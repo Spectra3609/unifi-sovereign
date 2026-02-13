@@ -1,0 +1,211 @@
+# UniFi Sovereign
+
+**Hunt. Claim. Adopt.**
+
+A cross-platform PowerShell toolkit for UniFi device migration and adoption via SSH.
+
+---
+
+## Features
+
+- **SANITY mode** - Read-only credential verification and device info collection
+- **MIGRATE mode** - Redirect devices to a new controller without reset or factory wipe
+- **ADOPT mode** - Full adoption workflow with optional factory reset
+
+**Key capabilities:**
+- Auto-installs dependencies (Posh-SSH)
+- Native TCP/22 parallel scan (no Nmap required)
+- CIDR or explicit IP list targeting
+- Multi-credential rotation with factory defaults fallback
+- Controller preflight check (8080 inform endpoint)
+- CSV logging with full device details
+- Factory reset cascade (3 methods for stubborn devices)
+
+**Cross-platform:** Works on Windows PowerShell 5.1+, PowerShell 7+ (macOS/Linux)
+
+---
+
+## Quick Start
+
+### Interactive Mode (recommended for first run)
+
+```powershell
+.\UniFi-MicroPlus.ps1
+```
+
+Follow the prompts to select mode, targets, credentials, and options.
+
+### One-Liner (remote execution)
+
+```powershell
+irm https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/UniFi-MicroPlus.ps1 | iex
+```
+
+### Command-Line Examples
+
+**Migrate a /24 subnet to new controller:**
+```powershell
+.\UniFi-MicroPlus.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -Username admin -Password ubnt
+```
+
+**Adopt specific devices with factory reset:**
+```powershell
+.\UniFi-MicroPlus.ps1 -Mode Adopt -IPs "192.168.1.10,192.168.1.11,192.168.1.12" -Controller 10.0.0.5 -ResetFirst
+```
+
+**Sanity check (read-only scan):**
+```powershell
+.\UniFi-MicroPlus.ps1 -Mode Sanity -Cidr 172.16.5.0/24
+```
+
+---
+
+## Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `-Mode` | Operation mode: `Sanity`, `Migrate`, or `Adopt` | No (prompts if omitted) |
+| `-Cidr` | Target subnet (e.g. `192.168.1.0/24`) | No (mutually exclusive with `-IPs`) |
+| `-IPs` | Comma-separated IP list | No (mutually exclusive with `-Cidr`) |
+| `-Controller` | Target controller IP/hostname | Yes (for Migrate/Adopt) |
+| `-Username` | SSH username to try first | No (falls back to factory defaults) |
+| `-Password` | SSH password (plaintext) | No |
+| `-ResetFirst` | Factory reset before adopt (Adopt mode only) | No |
+| `-SshTimeout` | SSH connection timeout (seconds) | No (default: 7) |
+| `-ScanTimeout` | TCP scan timeout per host (seconds) | No (default: 3) |
+| `-Parallel` | Max parallel scan threads | No (default: 128) |
+| `-OutCsv` | CSV output path | No (auto-generated) |
+
+---
+
+## Modes Explained
+
+### SANITY
+Read-only scan. Verifies SSH credentials and collects device information. No changes are made.
+
+**Use when:**
+- Testing credentials before migration
+- Auditing existing devices
+- Collecting inventory (MAC, model, firmware, current inform URL)
+
+### MIGRATE
+Re-points devices to a new controller by sending `set-inform` commands. **Does not reset or factory wipe devices.**
+
+**Use when:**
+- Moving devices between controllers
+- Devices are already adopted and configured
+- You want to preserve existing configuration
+
+### ADOPT
+Full adoption workflow with optional factory reset. Sends `set-inform` commands after optional wipe.
+
+**Use when:**
+- Devices are stuck in "pending adoption"
+- Previous controller is unreachable/dead
+- Clean slate adoption required
+- Devices need to be reclaimed from unknown state
+
+---
+
+## How It Works
+
+1. **Dependency Check** - Auto-installs NuGet and Posh-SSH if needed
+2. **TCP/22 Scan** - Parallel port sweep to find SSH-accessible devices
+3. **SSH Authentication** - Tries provided credentials, then factory defaults (`ubnt/ubnt`, `root/ubnt`)
+4. **Device Info Collection** - Pulls MAC, model, firmware, hostname, adopt status, current inform URL
+5. **Action Execution:**
+   - **SANITY:** Logs info, exits
+   - **MIGRATE:** Sends `set-inform` twice for reliability
+   - **ADOPT:** Optional factory reset → `set-inform` twice
+6. **CSV Export** - Logs all results with timestamps and status
+
+---
+
+## Output
+
+Results are exported to CSV with the following fields:
+
+- `Timestamp` - When the device was processed
+- `IP` - Device IP address
+- `MAC` - Device MAC address
+- `Connected` - SSH connection success (true/false)
+- `Username` - Credential that worked
+- `Model` - Device model (e.g. US-8-60W, UAP-AC-PRO)
+- `DevHostname` - Device hostname
+- `Firmware` - Current firmware version
+- `AdoptStatus` - Adoption status from `info` command
+- `CurrentInform` - Inform URL before changes
+- `Reset` - Reset status (N/A, Requested, OK, Failed)
+- `Inform1` - First set-inform response
+- `Inform2` - Second set-inform response
+- `Status` - Overall result (OK, CHECK, FAIL)
+- `Note` - Error messages or warnings
+
+---
+
+## Troubleshooting
+
+**"No hosts found with SSH (TCP/22) open"**
+- Verify VLAN/firewall rules allow SSH from scan host
+- Check that target subnet is correct
+- Ensure devices are powered on and network-accessible
+
+**"SSH auth failed (all credentials)"**
+- Verify SSH is enabled on devices
+- Check if custom credentials are set (not factory defaults)
+- Try providing known credentials with `-Username` and `-Password`
+
+**"Controller inform endpoint unreachable"**
+- Verify controller IP/hostname is correct
+- Check firewall rules allow port 8080
+- Ensure controller is running and reachable from devices
+
+**"Re-login failed post-reset"**
+- Factory reset takes 60-90 seconds, script waits 90s
+- Device may need more time, try manual SSH after a few minutes
+- Network changes during reset may cause connectivity issues
+
+---
+
+## Factory Reset Methods
+
+When `-ResetFirst` is used in ADOPT mode, the script attempts factory reset in this order:
+
+1. **cp/cfgmtd/reboot** - Copies default.cfg → system.cfg, writes with cfgmtd, reboots
+2. **syswrapper.sh** - Uses `syswrapper.sh restore-default`
+3. **set-default** - Falls back to `set-default` command
+
+Most devices support method 1. Methods 2 and 3 are fallbacks for edge cases.
+
+---
+
+## Security Notes
+
+- Credentials are passed as plaintext parameters (use responsibly)
+- Factory defaults are always tried as fallback
+- Script requires SSH access (TCP/22)
+- No data exfiltration - purely local operation
+- CSV logs contain device details (protect accordingly)
+
+---
+
+## Requirements
+
+- **PowerShell 5.1+** (Windows) or **PowerShell 7+** (macOS/Linux)
+- **Posh-SSH module** (auto-installed if missing)
+- **Network access** to target devices via SSH (TCP/22)
+- **Controller access** (for Migrate/Adopt modes)
+
+---
+
+## License
+
+MIT License - Use at your own risk. Not affiliated with Ubiquiti Inc.
+
+---
+
+## Credits
+
+Built by [Spectra](https://github.com/Spectra3609) for network engineers who've had enough of the UI.
+
+**Hunt. Claim. Adopt.** 🜂
