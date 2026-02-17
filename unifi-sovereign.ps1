@@ -97,20 +97,24 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "                          ╔════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "                          ║   UNIFI SOVEREIGN          ║" -ForegroundColor Cyan
+    Write-Host "                          ║   Hunt. Claim. Adopt.      ║" -ForegroundColor Cyan
+    Write-Host "                          ╚════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "                   UniFi Sovereign" -ForegroundColor White -BackgroundColor Black
+    Write-Host "                              ▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "                           ▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "                        ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "                     ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "                  ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "               ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "            ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "         ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "      ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
+    Write-Host "   ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "                    ▼ ▼ ▼" -ForegroundColor Cyan
-    Write-Host "                   ▼   ▼   ▼" -ForegroundColor Cyan
-    Write-Host "                  ▼       ▼" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "          Hunt. Claim. Adopt." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "       SSH Device Migration & Adoption Toolkit"
-    Write-Host "                   v$($script:ScriptVersion)"
-    Write-Host ""
-    Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "             SSH Device Migration & Adoption Toolkit"
+    Write-Host "                        v$($script:ScriptVersion)"
     Write-Host ""
 }
 

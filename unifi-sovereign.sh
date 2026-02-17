@@ -53,21 +53,30 @@ log_header() {
 }
 
 print_banner() {
-  echo ""
-  echo "  ${CYAN}════════════════════════════════════════════════════════════${NC}"
-  echo ""
-  echo "                   ${BOLD}UniFi Sovereign${NC}"
-  echo ""
-  echo "                    ${CYAN}▼ ▼ ▼${NC}"
-  echo "                   ${CYAN}▼   ▼   ▼${NC}"
-  echo "                  ${CYAN}▼       ▼${NC}"
-  echo ""
-  echo "          ${DIM}Hunt. Claim. Adopt.${NC}"
-  echo ""
-  echo "       SSH Device Migration & Adoption Toolkit"
-  echo "                   v${SCRIPT_VERSION}"
-  echo ""
-  echo "  ${CYAN}════════════════════════════════════════════════════════════${NC}"
+  cat << "EOF"
+
+EOF
+  echo -e "${CYAN}"
+  cat << "EOF"
+                          ╔════════════════════════════╗
+                          ║   ${NC}UNIFI SOVEREIGN${CYAN}        ║
+                          ║   Hunt. Claim. Adopt.      ║
+                          ╚════════════════════════════╝
+                          
+                              ▼▼▼▼▼▼▼
+                           ▼▼▼▼▼▼▼▼▼▼▼▼▼
+                        ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+                     ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+                  ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+               ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+            ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+         ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+      ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+   ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+EOF
+  echo -e "${NC}"
+  echo -e "             SSH Device Migration & Adoption Toolkit"
+  echo -e "                        v${SCRIPT_VERSION}"
   echo ""
 }
 
