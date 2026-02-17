@@ -11,8 +11,14 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.0.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_VERSION="3.0.1"
+
+# Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR="$(pwd)"
+fi
 
 # ===================================================================
 # GLOBAL STATE
