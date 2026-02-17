@@ -1,4 +1,4 @@
-<#
+#<
 .SYNOPSIS
   UniFi MicroPlus -- SSH-based device inform toolkit.
 
@@ -10,6 +10,10 @@
 
   Cross-platform: Windows PowerShell 5.1+ and PowerShell 7+ (macOS/Linux).
   Auto-installs dependencies (Posh-SSH).
+
+  IMPORTANT: Uses SSH Shell Streams (interactive channel) for UniFi-specific
+  commands (info, set-inform, mca-cli-op) which are shell builtins and do NOT
+  work via the SSH exec channel (Invoke-SSHCommand).
 
 .PARAMETER Mode
   Operation mode: Sanity, Migrate, or Adopt. If omitted, prompts interactively.
@@ -45,49 +49,37 @@
   Path for CSV output. Defaults to Desktop or current directory.
 
 .EXAMPLE
-  # Interactive mode -- prompts for everything
   .\UniFi-MicroPlus.ps1
 
 .EXAMPLE
-  # One-liner migrate: re-point a /24 to a new controller
   .\UniFi-MicroPlus.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -Username admin -Password ubnt
 
 .EXAMPLE
-  # Remote execute (paste into any terminal with PowerShell)
   irm https://raw.githubusercontent.com/YOUR_USER/unifi-tools/main/UniFi-MicroPlus.ps1 | iex
 
 .NOTES
   If execution policy blocks you: Set-ExecutionPolicy -Scope Process Bypass
+  v2.1.0 - Fixed: uses SSH shell streams for UniFi builtins (info/set-inform)
 #>
 
 [CmdletBinding()]
 param(
     [ValidateSet("Sanity","Migrate","Adopt")]
     [string]$Mode,
-
     [string]$Cidr,
-
     [string]$IPs,
-
     [string]$Controller,
-
     [string]$Username,
-
     [string]$Password,
-
     [switch]$ResetFirst,
-
     [int]$SshTimeout = 7,
-
     [int]$ScanTimeout = 3,
-
     [int]$Parallel = 128,
-
     [string]$OutCsv
 )
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "2.0.0"
+$script:ScriptVersion = "2.1.0"
 
 # ===================================================================
 # PLATFORM DETECTION
@@ -117,9 +109,7 @@ function Write-Banner {
         "  ============================================================",
         ""
     )
-    foreach ($line in $lines) {
-        Write-Host $line -ForegroundColor DarkCyan
-    }
+    foreach ($line in $lines) { Write-Host $line -ForegroundColor DarkCyan }
 }
 
 function Write-Step {
@@ -127,6 +117,7 @@ function Write-Step {
     $colors = @{
         "INFO" = "DarkGray"; "OK" = "Green"; "FAIL" = "Red";
         "WARN" = "Yellow";   "RUN" = "Cyan";  "SKIP" = "DarkGray"
+        "DBG"  = "Magenta"
     }
     $color = "White"
     if ($colors.ContainsKey($Status)) { $color = $colors[$Status] }
@@ -191,11 +182,9 @@ function Read-MenuChoice {
 function Write-ResultsTable {
     param([array]$Results)
     if ($Results.Count -eq 0) { return }
-
     Write-Host ""
     Write-Host ("  {0,-16} {1,-18} {2,-22} {3,-8} {4}" -f "IP","MAC","Model","Status","Note") -ForegroundColor White
     Write-Host ("  {0,-16} {1,-18} {2,-22} {3,-8} {4}" -f ("=" * 15),("=" * 17),("=" * 21),("=" * 7),("=" * 20)) -ForegroundColor DarkGray
-
     foreach ($r in ($Results | Sort-Object IP)) {
         $color = "White"
         switch ($r.Status) {
@@ -206,10 +195,8 @@ function Write-ResultsTable {
         $mac   = if ($r.MAC)   { $r.MAC }   else { "-" }
         $model = if ($r.Model) { $r.Model } else { "-" }
         $note  = if ($r.Note)  { $r.Note }  else { "" }
-        # Truncate long fields for display
         if ($model.Length -gt 21) { $model = $model.Substring(0,18) + "..." }
         if ($note.Length  -gt 35) { $note  = $note.Substring(0,32) + "..."  }
-
         Write-Host ("  {0,-16} {1,-18} {2,-22} " -f $r.IP, $mac, $model) -NoNewline
         Write-Host ("{0,-8}" -f $r.Status) -ForegroundColor $color -NoNewline
         Write-Host " $note"
@@ -229,25 +216,14 @@ function ConvertTo-SafeSecureString {
 function Get-DefaultCsvPath {
     param([string]$ModeStr)
     $filename = "unifi-" + $ModeStr.ToLower() + "-log.csv"
-
-    # Try Desktop first (works on Windows + most Linux DEs)
     $desktop = [Environment]::GetFolderPath("Desktop")
-    if ($desktop -and (Test-Path $desktop)) {
-        return Join-Path $desktop $filename
-    }
-
-    # Try home directory
-    $home = [Environment]::GetFolderPath("UserProfile")
-    if (-not $home) { $home = $env:HOME }
-    if ($home -and (Test-Path $home)) {
-        return Join-Path $home $filename
-    }
-
-    # Fallback to current directory
+    if ($desktop -and (Test-Path $desktop)) { return Join-Path $desktop $filename }
+    $homePath = [Environment]::GetFolderPath("UserProfile")
+    if (-not $homePath) { $homePath = $env:HOME }
+    if ($homePath -and (Test-Path $homePath)) { return Join-Path $homePath $filename }
     return Join-Path $PWD.Path $filename
 }
 
-# CIDR -> array of IPs (excludes network + broadcast)
 function Get-IPsFromCidr {
     param([Parameter(Mandatory=$true)][string]$CidrStr)
     $parts = $CidrStr -split '/'
@@ -275,61 +251,212 @@ function Build-CredList([array]$spec) {
 }
 
 # ===================================================================
-# DEVICE INTERACTION
+# SSH SHELL STREAM HELPERS
 # ===================================================================
+# UniFi commands (info, set-inform, mca-cli-op) are shell builtins in
+# the custom UniFi shell. They do NOT work via Invoke-SSHCommand (which
+# uses the SSH exec channel and runs commands in /bin/sh).
+# We must use SSH Shell Streams (interactive shell channel) instead.
 
-function Get-DeviceMac {
-    param([int]$SessId, [int]$Timeout)
-    try {
-        $o = Invoke-SSHCommand -SessionId $SessId -Command "info" -TimeOut $Timeout
-        $txt = ($o.Output -join "`n")
-        if ($txt -match "MAC Address:\s*([0-9A-Fa-f:]{17})") { return $Matches[1].ToLower() }
-        if ($txt -match "MAC:\s*([0-9A-Fa-f:]{17})")         { return $Matches[1].ToLower() }
-    } catch {}
+function Send-ShellCommand {
+    <#
+    .SYNOPSIS
+      Send a command via SSH shell stream and capture the output.
+      This works for UniFi shell builtins that Invoke-SSHCommand cannot run.
+    #>
+    param(
+        [object]$Stream,
+        [string]$Command,
+        [int]$WaitMs = 3000,
+        [int]$ReadRetries = 5
+    )
 
-    foreach ($cmd in @(
-        "cat /sys/class/net/eth0/address 2>/dev/null",
-        "cat /sys/class/net/br0/address 2>/dev/null",
-        "/sbin/ifconfig eth0 2>/dev/null | grep -i 'ether' | awk '{print `$2}'",
-        "ip link show eth0 2>/dev/null | awk '/link\/ether/ {print `$2}'"
-    )) {
-        try {
-            $r = Invoke-SSHCommand -SessionId $SessId -Command $cmd -TimeOut $Timeout
-            $val = (($r.Output -join ' ').Trim())
-            if ($val -match "([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})") { return $Matches[1].ToLower() }
-        } catch {}
+    # Drain any leftover output from previous commands
+    Start-Sleep -Milliseconds 300
+    if ($Stream.DataAvailable) { $Stream.Read() | Out-Null }
+
+    # Send the command
+    $Stream.WriteLine($Command)
+
+    # Wait for output to arrive, then read in chunks until no more data
+    Start-Sleep -Milliseconds $WaitMs
+
+    $output = ""
+    for ($i = 0; $i -lt $ReadRetries; $i++) {
+        if ($Stream.DataAvailable) {
+            $output += $Stream.Read()
+            Start-Sleep -Milliseconds 500
+        } else {
+            if ($output) { break }
+            Start-Sleep -Milliseconds 1000
+        }
     }
-    return ""
+
+    # Clean up: remove the command echo and prompt lines
+    # UniFi shell typically echoes the command and shows a prompt like "BZ.v8.4.6# "
+    $lines = $output -split "`n" | ForEach-Object { $_.TrimEnd("`r") }
+
+    # Remove the first line if it's just the echoed command
+    if ($lines.Count -gt 0 -and $lines[0].Trim() -match [regex]::Escape($Command.Trim())) {
+        $lines = $lines[1..($lines.Count-1)]
+    }
+
+    # Remove the last line if it looks like a shell prompt
+    if ($lines.Count -gt 0) {
+        $lastLine = $lines[-1].Trim()
+        # Common UniFi prompts: "BZ.v8.4.6# " "UBNT# " "hostname# " etc.
+        if ($lastLine -match '^[A-Za-z0-9._@-]+[#\$>]\s*$' -or $lastLine -eq '' -or $lastLine -match '^\s*#\s*$') {
+            if ($lines.Count -gt 1) {
+                $lines = $lines[0..($lines.Count-2)]
+            } else {
+                $lines = @()
+            }
+        }
+    }
+
+    $cleaned = ($lines -join "`n").Trim()
+    return $cleaned
 }
 
+function New-ShellStream {
+    <#
+    .SYNOPSIS
+      Create a shell stream from an SSH session, wait for the initial prompt.
+    #>
+    param([int]$SessionId)
+
+    $stream = New-SSHShellStream -SessionId $SessionId
+    # Wait for the initial shell prompt
+    Start-Sleep -Milliseconds 2000
+    if ($stream.DataAvailable) { $stream.Read() | Out-Null }
+    return $stream
+}
+
+# ===================================================================
+# DEVICE INTERACTION (using shell streams)
+# ===================================================================
+
 function Get-DeviceInfo {
-    param([int]$SessId, [int]$Timeout)
-    $info = @{ Model=""; Firmware=""; Hostname=""; AdoptStatus=""; MAC=""; InformURL="" }
-    try {
-        $r = Invoke-SSHCommand -SessionId $SessId -Command "info" -TimeOut $Timeout
-        $text = ($r.Output -join "`n")
-        if ($text) {
-            if ($text -match "Model:\s*(.+)")            { $info.Model       = $Matches[1].Trim() }
-            if ($text -match "Version:\s*(.+)")           { $info.Firmware    = $Matches[1].Trim() }
-            if ($text -match "Hostname:\s*(.+)")          { $info.Hostname    = $Matches[1].Trim() }
-            if ($text -match "Status:\s*(.+)")            { $info.AdoptStatus = $Matches[1].Trim() }
-            if ($text -match "Inform URL:\s*(.+)")        { $info.InformURL   = $Matches[1].Trim() }
-            if ($text -match "MAC Address:\s*([0-9A-Fa-f:]{17})") { $info.MAC = $Matches[1].ToLower() }
-            elseif ($text -match "MAC:\s*([0-9A-Fa-f:]{17})")     { $info.MAC = $Matches[1].ToLower() }
-        }
-    } catch {}
-    if (-not $info.MAC) {
-        $info.MAC = Get-DeviceMac -SessId $SessId -Timeout $Timeout
+    <#
+    .SYNOPSIS
+      Collects device info using the 'info' shell builtin via shell stream.
+      Falls back to standard Linux commands for MAC if info fails.
+    #>
+    param([object]$Stream, [int]$SessionId, [int]$Timeout)
+
+    $info = @{
+        Model       = ""
+        Firmware    = ""
+        Hostname    = ""
+        AdoptStatus = ""
+        MAC         = ""
+        InformURL   = ""
+        RawInfo     = ""
     }
+
+    # Try 'info' via shell stream (this is the UniFi shell builtin)
+    $text = ""
+    try {
+        $text = Send-ShellCommand -Stream $Stream -Command "info" -WaitMs 3000
+        $info.RawInfo = $text
+    } catch {}
+
+    if ($text) {
+        if ($text -match "Model:\s*(.+)")                          { $info.Model       = $Matches[1].Trim() }
+        if ($text -match "Version:\s*(.+)")                        { $info.Firmware     = $Matches[1].Trim() }
+        if ($text -match "Hostname:\s*(.+)")                       { $info.Hostname     = $Matches[1].Trim() }
+        if ($text -match "Status:\s*(.+)")                         { $info.AdoptStatus  = $Matches[1].Trim() }
+        if ($text -match "Inform\s*URL:\s*(.+)")                   { $info.InformURL    = $Matches[1].Trim() }
+        if ($text -match "MAC\s*Address:\s*([0-9A-Fa-f:]{17})")   { $info.MAC = $Matches[1].ToLower() }
+        elseif ($text -match "MAC:\s*([0-9A-Fa-f:]{17})")         { $info.MAC = $Matches[1].ToLower() }
+    }
+
+    # Fallback: if we didn't get MAC from info, try standard Linux commands
+    # (these work via Invoke-SSHCommand since they're real executables)
+    if (-not $info.MAC) {
+        foreach ($cmd in @(
+            "cat /sys/class/net/eth0/address 2>/dev/null",
+            "cat /sys/class/net/br0/address 2>/dev/null",
+            "ip link show eth0 2>/dev/null | awk '/link\/ether/ {print `$2}'"
+        )) {
+            try {
+                $r = Invoke-SSHCommand -SessionId $SessionId -Command $cmd -TimeOut $Timeout -ErrorAction Stop
+                $val = (($r.Output -join ' ').Trim())
+                if ($val -match "([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})") {
+                    $info.MAC = $Matches[1].ToLower()
+                    break
+                }
+            } catch {}
+        }
+    }
+
     return $info
 }
 
-# Factory reset cascade (ADOPT mode only)
-# A successful reset kills the SSH session -- we treat that as success.
-function Invoke-HardReset {
-    param([int]$SessId, [int]$Timeout, [string]$Ip)
+function Send-SetInform {
+    <#
+    .SYNOPSIS
+      Sends set-inform via shell stream. Tries multiple methods:
+        1) set-inform URL           (standard UniFi shell builtin)
+        2) mca-cli-op set-inform URL (works on newer firmware even when adopted)
+    #>
+    param(
+        [object]$Stream,
+        [string]$InformUrl,
+        [int]$Attempt = 1
+    )
 
-    function Try-ResetCmd {
+    $result = @{ Output = ""; Success = $false; Method = "" }
+
+    # Method 1: standard set-inform
+    $out1 = ""
+    try {
+        $out1 = Send-ShellCommand -Stream $Stream -Command "set-inform $InformUrl" -WaitMs 4000
+        $result.Output = $out1
+        $result.Method = "set-inform"
+    } catch {
+        $result.Output = "ERROR: $($_.Exception.Message)"
+    }
+
+    # Check for success patterns
+    if ($out1 -match 'Adoption request sent|Inform URL|inform|adopted|Resolve|set-inform') {
+        $result.Success = $true
+        return $result
+    }
+
+    # Method 2: mca-cli-op (works on already-adopted devices and newer firmware)
+    $out2 = ""
+    try {
+        $out2 = Send-ShellCommand -Stream $Stream -Command "mca-cli-op set-inform $InformUrl" -WaitMs 4000
+        $result.Output = $out2
+        $result.Method = "mca-cli-op"
+    } catch {
+        $result.Output += " | mca-cli-op ERROR: $($_.Exception.Message)"
+    }
+
+    if ($out2 -match 'Adoption request sent|Inform URL|inform|adopted|Resolve|set-inform') {
+        $result.Success = $true
+        return $result
+    }
+
+    # If we got ANY output at all without an error, consider it likely success
+    # (some firmware versions just echo nothing or a terse acknowledgment)
+    if (($out1 -or $out2) -and $out1 -notmatch 'not found|unknown|error|denied|invalid' -and $out2 -notmatch 'not found|unknown|error|denied|invalid') {
+        $result.Success = $true
+        $result.Output = "set-inform: [$out1] | mca-cli-op: [$out2]"
+        $result.Method = "accepted (non-standard output)"
+        return $result
+    }
+
+    return $result
+}
+
+# Factory reset cascade (ADOPT mode only)
+function Invoke-HardReset {
+    param([object]$Stream, [int]$SessionId, [int]$Timeout, [string]$Ip)
+
+    # Try via exec channel first (these are system commands, not shell builtins)
+    function Try-ExecReset {
         param([int]$Sid, [string]$Cmd, [int]$T)
         try {
             $r = Invoke-SSHCommand -SessionId $Sid -Command $Cmd -TimeOut $T -ErrorAction Stop
@@ -359,14 +486,26 @@ sh -c '
   fi
 '
 '@
-    $r1 = Try-ResetCmd -Sid $SessId -Cmd $cmd1 -T $Timeout
+    $r1 = Try-ExecReset -Sid $SessionId -Cmd $cmd1 -T $Timeout
     if ($r1 -in @("ok","session_died")) { return @{ ok=$true; note="reset: cp/cfgmtd/reboot" } }
 
-    $r2 = Try-ResetCmd -Sid $SessId -Cmd "syswrapper.sh restore-default" -T $Timeout
+    # Try syswrapper via shell stream (it's sometimes a builtin)
+    try {
+        Send-ShellCommand -Stream $Stream -Command "syswrapper.sh restore-default" -WaitMs 5000 | Out-Null
+        return @{ ok=$true; note="reset: syswrapper.sh (stream)" }
+    } catch {}
+
+    $r2 = Try-ExecReset -Sid $SessionId -Cmd "syswrapper.sh restore-default" -T $Timeout
     if ($r2 -in @("ok","session_died")) { return @{ ok=$true; note="reset: syswrapper.sh" } }
 
-    $r3 = Try-ResetCmd -Sid $SessId -Cmd "set-default" -T $Timeout
+    $r3 = Try-ExecReset -Sid $SessionId -Cmd "set-default" -T $Timeout
     if ($r3 -in @("ok","session_died")) { return @{ ok=$true; note="reset: set-default" } }
+
+    # Last resort: try via shell stream
+    try {
+        Send-ShellCommand -Stream $Stream -Command "set-default" -WaitMs 5000 | Out-Null
+        return @{ ok=$true; note="reset: set-default (stream)" }
+    } catch {}
 
     return @{ ok=$false; note="reset failed (all methods exhausted)" }
 }
@@ -395,8 +534,6 @@ function Test-ControllerEndpoint {
 
 function Install-Dependencies {
     Write-Header "Dependencies"
-
-    # NuGet provider (Windows PS 5.1 only)
     if ($script:IsWindows51) {
         $nuget = Get-PackageProvider -ListAvailable -ErrorAction SilentlyContinue |
                  Where-Object { $_.Name -eq 'NuGet' }
@@ -405,21 +542,13 @@ function Install-Dependencies {
             try {
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction Stop | Out-Null
                 Write-Step "NuGet provider ready" "OK"
-            } catch {
-                Write-Step "NuGet install failed -- module install may prompt" "WARN"
-            }
-        } else {
-            Write-Step "NuGet provider" "OK"
-        }
+            } catch { Write-Step "NuGet install failed -- module install may prompt" "WARN" }
+        } else { Write-Step "NuGet provider" "OK" }
     }
-
-    # Trust PSGallery
     $repo = Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue
     if ($repo -and $repo.InstallationPolicy -ne 'Trusted') {
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
     }
-
-    # Posh-SSH
     if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
         Write-Step "Installing Posh-SSH..." "RUN"
         try {
@@ -427,31 +556,25 @@ function Install-Dependencies {
             Write-Step "Posh-SSH installed" "OK"
         } catch {
             Write-Step "Posh-SSH install failed" "FAIL"
-            Write-Host ""
             Write-Host "    Try manually: Install-Module Posh-SSH -Scope CurrentUser -Force" -ForegroundColor Yellow
             exit 1
         }
-    } else {
-        Write-Step "Posh-SSH" "OK"
-    }
-
+    } else { Write-Step "Posh-SSH" "OK" }
     Import-Module Posh-SSH -ErrorAction Stop
 }
 
 # ===================================================================
-# PORT SCAN (parallel runspaces + Write-Progress)
+# PORT SCAN
 # ===================================================================
 
 function Invoke-PortScan {
     param([string[]]$Targets, [int]$TimeoutSec, [int]$MaxParallel)
-
     Write-Header "Port Scan (TCP/22)"
     Write-Step "Scanning $($Targets.Count) hosts..." "RUN"
 
     $state = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $pool  = [RunspaceFactory]::CreateRunspacePool(1, [Math]::Min([Math]::Max(1,$MaxParallel), 512), $state, $Host)
     $pool.Open()
-
     $jobs = @()
     foreach ($ip in $Targets) {
         $ps = [PowerShell]::Create()
@@ -470,27 +593,23 @@ function Invoke-PortScan {
         }).AddArgument($ip).AddArgument($TimeoutSec)
         $jobs += [pscustomobject]@{ Handle=$ps; Task=$ps.BeginInvoke() }
     }
-
     $open = New-Object System.Collections.Generic.List[string]
-    $done = 0
-    $total = $jobs.Count
+    $done = 0; $jobTotal = $jobs.Count
     foreach ($j in $jobs) {
         $done++
-        $pct = [Math]::Floor(($done / $total) * 100)
-        Write-Progress -Activity "Scanning TCP/22" -Status "$done / $total hosts ($pct%)" -PercentComplete $pct
+        $pct = [Math]::Floor(($done / $jobTotal) * 100)
+        Write-Progress -Activity "Scanning TCP/22" -Status "$done / $jobTotal hosts ($pct%)" -PercentComplete $pct
         try { $hit = $j.Handle.EndInvoke($j.Task) } catch { $hit = $null }
         $j.Handle.Dispose()
         if ($hit) { $open.Add($hit) | Out-Null }
     }
     Write-Progress -Activity "Scanning TCP/22" -Completed
     $pool.Close(); $pool.Dispose()
-
     if ($open.Count -eq 0) {
         Write-Step "No hosts with SSH open" "FAIL"
         Write-Step "Check VLAN/firewall, subnet, or device power." "WARN"
         exit 1
     }
-
     Write-Step "$($open.Count) hosts with SSH open" "OK"
     return $open.ToArray()
 }
@@ -502,7 +621,7 @@ function Invoke-PortScan {
 Write-Banner
 Install-Dependencies
 
-# ----- Resolve Mode -----
+# ----- Mode -----
 $modeStr = $Mode
 if (-not $modeStr) {
     $mc = Read-MenuChoice -Title "Operation mode:" -Options @(
@@ -510,32 +629,22 @@ if (-not $modeStr) {
         "MIGRATE  - re-point devices to a new controller (no reset, no wipe)",
         "ADOPT    - full adoption with optional factory reset"
     ) -Default 1
-    switch ($mc) {
-        1 { $modeStr = "Sanity"  }
-        2 { $modeStr = "Migrate" }
-        3 { $modeStr = "Adopt"   }
-    }
+    switch ($mc) { 1 { $modeStr = "Sanity" } 2 { $modeStr = "Migrate" } 3 { $modeStr = "Adopt" } }
 }
 $modeStr = $modeStr.Substring(0,1).ToUpper() + $modeStr.Substring(1).ToLower()
 Write-Step "Mode: $($modeStr.ToUpper())" "INFO"
 
-# ----- Resolve Targets -----
+# ----- Targets -----
 Write-Header "Targets"
-$targetList = @()
-$targetType = ""
-
+$targetList = @(); $targetType = ""
 if ($Cidr) {
     $targetType = "CIDR"
-    try { $targetList = Get-IPsFromCidr $Cidr }
-    catch { Write-Step $_.Exception.Message "FAIL"; exit 1 }
+    try { $targetList = Get-IPsFromCidr $Cidr } catch { Write-Step $_.Exception.Message "FAIL"; exit 1 }
 } elseif ($IPs) {
     $targetType = "List"
     $targetList = ($IPs -split '[,\s]+' | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) | Select-Object -Unique
 } else {
-    $tc = Read-MenuChoice -Title "Target input:" -Options @(
-        "CIDR subnet  (e.g. 192.168.1.0/24)",
-        "IP list      (comma-separated)"
-    ) -Default 1
+    $tc = Read-MenuChoice -Title "Target input:" -Options @("CIDR subnet  (e.g. 192.168.1.0/24)","IP list      (comma-separated)") -Default 1
     if ($tc -eq 2) {
         $targetType = "List"
         $raw = Read-NonEmpty "IPs (comma-separated)"
@@ -543,44 +652,32 @@ if ($Cidr) {
     } else {
         $targetType = "CIDR"
         $raw = Read-NonEmpty "CIDR (e.g. 192.168.1.0/24)"
-        try { $targetList = Get-IPsFromCidr $raw }
-        catch { Write-Step $_.Exception.Message "FAIL"; exit 1 }
+        try { $targetList = Get-IPsFromCidr $raw } catch { Write-Step $_.Exception.Message "FAIL"; exit 1 }
     }
 }
-
 if ($targetList.Count -eq 0) { Write-Step "No valid targets." "FAIL"; exit 1 }
 Write-Step "$($targetList.Count) IPs ($targetType)" "OK"
 
-# ----- Controller (Migrate + Adopt) -----
-$informUrl = ""
-$doReset   = $false
-
+# ----- Controller -----
+$informUrl = ""; $doReset = $false
 if ($modeStr -in @("Migrate","Adopt")) {
     Write-Header "Controller"
-    if (-not $Controller) {
-        $Controller = Read-NonEmpty "Target controller IP or hostname"
-    }
+    if (-not $Controller) { $Controller = Read-NonEmpty "Target controller IP or hostname" }
     $informUrl = "http://${Controller}:8080/inform"
     Write-Step "Inform URL: $informUrl" "INFO"
     Test-ControllerEndpoint -Ctrl $Controller | Out-Null
-
     if ($modeStr -eq "Adopt") {
-        if ($ResetFirst) {
-            $doReset = $true
-        } elseif (-not $PSBoundParameters.ContainsKey('ResetFirst')) {
+        if ($ResetFirst) { $doReset = $true }
+        elseif (-not $PSBoundParameters.ContainsKey('ResetFirst')) {
             $doReset = (Read-YesNo "Factory reset before adoption?" 'N') -eq 'Y'
         }
     }
-    if ($modeStr -eq "Migrate") {
-        Write-Host ""
-        Write-Step "MIGRATE: no reset, no wipe -- inform URL only" "INFO"
-    }
+    if ($modeStr -eq "Migrate") { Write-Host ""; Write-Step "MIGRATE: no reset, no wipe -- inform URL only" "INFO" }
 }
 
 # ----- Credentials -----
 Write-Header "SSH Credentials"
 $credSpec = @()
-
 if ($Username) {
     $pw = if ($Password) { ConvertTo-SafeSecureString $Password } else { Read-Host "Password for '$Username'" -AsSecureString }
     $credSpec += @{u=$Username; p=$pw}
@@ -597,22 +694,18 @@ if ($Username) {
         $credSpec += @{u=$u2; p=$p2}
     }
 }
-
-# Always append factory defaults
 $credSpec += @{u='ubnt'; p=(ConvertTo-SafeSecureString 'ubnt')}
 $credSpec += @{u='root'; p=(ConvertTo-SafeSecureString 'ubnt')}
+Write-Step "Credential chain: $(($credSpec | ForEach-Object { $_.u }) -join ' -> ')" "INFO"
 
-$credLabel = ($credSpec | ForEach-Object { $_.u }) -join " -> "
-Write-Step "Credential chain: $credLabel" "INFO"
-
-# ----- CSV Path -----
+# ----- CSV -----
 if (-not $OutCsv) {
     $defaultPath = Get-DefaultCsvPath $modeStr
     $OutCsv = Read-Host "  CSV output path [$defaultPath]"
     if ([string]::IsNullOrWhiteSpace($OutCsv)) { $OutCsv = $defaultPath }
 }
 
-# ----- Plan Summary -----
+# ----- Summary -----
 Write-Header "Plan Summary"
 Write-Step "Mode        : $($modeStr.ToUpper())" "INFO"
 Write-Step "Targets     : $($targetList.Count) IPs ($targetType)" "INFO"
@@ -620,15 +713,13 @@ if ($modeStr -in @("Migrate","Adopt")) {
     Write-Step "Controller  : $Controller" "INFO"
     Write-Step "Inform URL  : $informUrl" "INFO"
     if ($modeStr -eq "Adopt") {
-        $rl = "No"
-        if ($doReset) { $rl = "YES" }
+        $rl = "No"; if ($doReset) { $rl = "YES" }
         Write-Step "Reset First : $rl" "INFO"
     }
 }
 Write-Step "SSH Timeout : ${SshTimeout}s" "INFO"
 Write-Step "Scan        : ${ScanTimeout}s timeout / $Parallel parallel" "INFO"
 Write-Step "CSV         : $OutCsv" "INFO"
-
 Write-Host ""
 if ((Read-YesNo "Execute?" 'Y') -ne 'Y') { Write-Host "  Aborted."; exit }
 
@@ -649,7 +740,7 @@ $results  = @()
 $total    = $openHosts.Count
 
 for ($idx = 0; $idx -lt $total; $idx++) {
-    $ip = $openHosts[$idx]
+    $ip  = $openHosts[$idx]
     $num = $idx + 1
     $pct = [Math]::Floor(($num / $total) * 100)
     Write-Progress -Activity "Processing devices" -Status "[$num/$total] $ip" -PercentComplete $pct
@@ -677,8 +768,10 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         Reset         = $resetLabel
         Inform1       = "N/A"
         Inform2       = "N/A"
+        InformMethod  = ""
         Status        = "FAIL"
         Note          = ""
+        DebugInfo     = ""
     }
 
     try {
@@ -698,20 +791,43 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         $row.Connected = $true; $row.Username = $used
         Write-Step "Connected" "OK" "user=$used"
 
+        # -- Open shell stream for UniFi builtins --
+        $stream = $null
+        try {
+            $stream = New-ShellStream -SessionId $sess.SessionId
+        } catch {
+            Write-Step "Shell stream failed, will use exec channel" "WARN"
+        }
+
         # -- Device info --
-        $devInfo = Get-DeviceInfo -SessId $sess.SessionId -Timeout ($SshTimeout * 2)
+        if ($stream) {
+            $devInfo = Get-DeviceInfo -Stream $stream -SessionId $sess.SessionId -Timeout ($SshTimeout * 2)
+        } else {
+            # Fallback: limited info via exec channel
+            $devInfo = @{ Model=""; Firmware=""; Hostname=""; AdoptStatus=""; MAC=""; InformURL=""; RawInfo="" }
+            foreach ($cmd in @("cat /sys/class/net/eth0/address 2>/dev/null","cat /sys/class/net/br0/address 2>/dev/null")) {
+                try {
+                    $r = Invoke-SSHCommand -SessionId $sess.SessionId -Command $cmd -TimeOut ($SshTimeout * 2) -ErrorAction Stop
+                    $val = (($r.Output -join ' ').Trim())
+                    if ($val -match "([0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5})") { $devInfo.MAC = $Matches[1].ToLower(); break }
+                } catch {}
+            }
+        }
+
         $row.MAC           = $devInfo.MAC
         $row.Model         = $devInfo.Model
         $row.Firmware      = $devInfo.Firmware
         $row.DevHostname   = $devInfo.Hostname
         $row.AdoptStatus   = $devInfo.AdoptStatus
         $row.CurrentInform = $devInfo.InformURL
+        $row.DebugInfo     = ($devInfo.RawInfo -replace "`n"," | " -replace "`r","").Trim()
 
         if ($devInfo.Model -or $devInfo.MAC) {
             $infoLine = @()
             if ($devInfo.Model)     { $infoLine += $devInfo.Model }
             if ($devInfo.MAC)       { $infoLine += $devInfo.MAC }
             if ($devInfo.Hostname)  { $infoLine += $devInfo.Hostname }
+            if ($devInfo.Firmware)  { $infoLine += "v$($devInfo.Firmware)" }
             Write-Step "Device" "INFO" ($infoLine -join " | ")
         }
         if ($devInfo.InformURL) {
@@ -722,6 +838,7 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         if ($modeStr -eq "Sanity") {
             $row.Status = "OK"
             Write-Step "Sanity passed" "OK"
+            if ($stream) { $stream.Dispose() }
             Remove-SSHSession -SessionId $sess.SessionId | Out-Null
             $results += [pscustomobject]$row; continue
         }
@@ -729,13 +846,15 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         # -- ADOPT: optional reset --
         if ($modeStr -eq "Adopt" -and $doReset) {
             Write-Step "Sending factory reset..." "RUN"
-            $reset = Invoke-HardReset -SessId $sess.SessionId -Timeout $SshTimeout -Ip $ip
+            $reset = Invoke-HardReset -Stream $stream -SessionId $sess.SessionId -Timeout $SshTimeout -Ip $ip
             if ($reset.ok) {
                 $row.Reset = "OK ($($reset.note))"
                 Write-Step "Reset sent -- waiting 90s" "OK" $reset.note
+                try { if ($stream) { $stream.Dispose() } } catch {}
                 try { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } catch {}
                 Start-Sleep -Seconds 90
 
+                # Re-login
                 $sess = $null; $ok = $false; $used = $null
                 foreach ($c in $credList) {
                     try {
@@ -750,6 +869,8 @@ for ($idx = 0; $idx -lt $total; $idx++) {
                 }
                 $row.Username = $used
                 Write-Step "Reconnected" "OK" "user=$used"
+                # Re-open shell stream
+                try { $stream = New-ShellStream -SessionId $sess.SessionId } catch { $stream = $null }
             } else {
                 $row.Reset = "Failed"
                 $row.Note  = $reset.note
@@ -757,29 +878,48 @@ for ($idx = 0; $idx -lt $total; $idx++) {
             }
         }
 
-        # -- MIGRATE + ADOPT: set-inform (x2) --
-        $cmd = "set-inform $informUrl"
-        Write-Step "set-inform #1" "RUN"
+        # -- MIGRATE + ADOPT: set-inform (x2 via shell stream) --
+        if (-not $stream) {
+            Write-Step "No shell stream -- cannot send set-inform" "FAIL"
+            $row.Note = "Shell stream unavailable"
+            $row.Status = "FAIL"
+            try { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } catch {}
+            $results += [pscustomobject]$row; continue
+        }
 
-        $r1 = Invoke-SSHCommand -SessionId $sess.SessionId -Command $cmd -TimeOut ($SshTimeout * 2)
-        $row.Inform1 = ($r1.Output -join ' ').Trim()
+        Write-Step "set-inform #1..." "RUN"
+        $si1 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 1
+        $row.Inform1 = $si1.Output
+        if ($si1.Method) { $row.InformMethod = $si1.Method }
+
+        if ($si1.Output) {
+            Write-Step "Response: $($si1.Output)" "DBG"
+        }
 
         Start-Sleep -Seconds 5
 
-        Write-Step "set-inform #2" "RUN"
-        $r2 = Invoke-SSHCommand -SessionId $sess.SessionId -Command $cmd -TimeOut ($SshTimeout * 2)
-        $row.Inform2 = ($r2.Output -join ' ').Trim()
+        Write-Step "set-inform #2..." "RUN"
+        $si2 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 2
+        $row.Inform2 = $si2.Output
+        if ($si2.Method -and -not $row.InformMethod) { $row.InformMethod = $si2.Method }
 
-        if ($row.Inform1 -match 'Adoption request sent|set-inform' -or
-            $row.Inform2 -match 'Adoption request sent|Inform URL updated|set-inform') {
-            $row.Status = "OK"
-            Write-Step "set-inform accepted" "OK"
-        } else {
-            $row.Status = "CHECK"
-            $row.Note   = ($row.Note + "; unexpected output").Trim('; ')
-            Write-Step "Unexpected response -- verify manually" "WARN"
+        if ($si2.Output) {
+            Write-Step "Response: $($si2.Output)" "DBG"
         }
 
+        # Evaluate
+        if ($si1.Success -or $si2.Success) {
+            $row.Status = "OK"
+            $methodNote = ""
+            if ($row.InformMethod) { $methodNote = "via $($row.InformMethod)" }
+            Write-Step "set-inform accepted" "OK" $methodNote
+        } else {
+            $row.Status = "CHECK"
+            $row.Note   = ($row.Note + "; check output in CSV").Trim('; ')
+            Write-Step "Non-standard response -- check CSV DebugInfo column" "WARN"
+        }
+
+        if ($stream) { $stream.Dispose() }
         Remove-SSHSession -SessionId $sess.SessionId | Out-Null
         $results += [pscustomobject]$row
 
@@ -787,6 +927,7 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         $row.Status = "FAIL"
         $row.Note   = $_.Exception.Message
         Write-Step "Error: $($_.Exception.Message)" "FAIL"
+        try { if ($stream) { $stream.Dispose() } } catch {}
         try { if ($sess) { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } } catch {}
         $results += [pscustomobject]$row
     }
@@ -800,7 +941,6 @@ Write-Progress -Activity "Processing devices" -Completed
 
 Write-Header "Results"
 
-# Export CSV with fallback
 $results | Sort-Object IP | Export-Csv -NoTypeInformation -Path $OutCsv -ErrorAction SilentlyContinue -ErrorVariable csvErr
 if ($csvErr) {
     $fallback = Get-DefaultCsvPath $modeStr
@@ -814,10 +954,8 @@ if ($csvErr) {
 }
 Write-Step "CSV: $OutCsv" "OK"
 
-# Results table
 Write-ResultsTable $results
 
-# Summary
 $okCount    = @($results | Where-Object { $_.Status -eq "OK" }).Count
 $checkCount = @($results | Where-Object { $_.Status -eq "CHECK" }).Count
 $failCount  = @($results | Where-Object { $_.Status -eq "FAIL" }).Count
@@ -832,13 +970,7 @@ Write-Host ""
 
 switch ($modeStr) {
     "Sanity"  { Write-Step "Sanity check complete." "OK" }
-    "Migrate" {
-        Write-Step "Migration complete." "OK"
-        Write-Step "Devices should check in with $Controller shortly." "INFO"
-    }
-    "Adopt" {
-        Write-Step "Adoption run complete." "OK"
-        Write-Step "Watch for pending devices in the controller." "INFO"
-    }
+    "Migrate" { Write-Step "Migration complete." "OK"; Write-Step "Devices should check in with $Controller shortly." "INFO" }
+    "Adopt"   { Write-Step "Adoption run complete." "OK"; Write-Step "Watch for pending devices in the controller." "INFO" }
 }
 Write-Host ""

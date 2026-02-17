@@ -119,6 +119,22 @@ Full adoption workflow with optional factory reset. Sends `set-inform` commands 
    - **ADOPT:** Optional factory reset → `set-inform` twice
 6. **CSV Export** - Logs all results with timestamps and status
 
+### SSH Shell Streams (v2.1.0+)
+
+**Critical fix:** UniFi devices use a custom shell with built-in commands (`info`, `set-inform`, `mca-cli-op`) that **do NOT work via the standard SSH exec channel**. These are shell builtins, not executables in PATH.
+
+**v2.0.0 and earlier** used `Invoke-SSHCommand` (SSH exec channel), which runs commands in `/bin/sh` — this broke device info collection. You'd see:
+- MAC address populated ✓ (because `cat` is a real file)
+- Model/Firmware empty ✗ (because `info` didn't run, it's a builtin)
+- `set-inform` failing silently ✗ (same reason)
+
+**v2.1.0 fix:**
+- Uses **SSH Shell Streams** (interactive shell channel) for UniFi builtins
+- `Send-ShellCommand()` function handles the shell prompt cleanup
+- `Send-SetInform()` tries both `set-inform` and `mca-cli-op` (works on already-adopted devices)
+- Captures raw output in `DebugInfo` column for troubleshooting
+- More lenient response matching (doesn't require specific strings, just non-error output)
+
 ---
 
 ## Output
@@ -138,8 +154,10 @@ Results are exported to CSV with the following fields:
 - `Reset` - Reset status (N/A, Requested, OK, Failed)
 - `Inform1` - First set-inform response
 - `Inform2` - Second set-inform response
+- `InformMethod` - Which method worked (`set-inform`, `mca-cli-op`, etc.)
 - `Status` - Overall result (OK, CHECK, FAIL)
 - `Note` - Error messages or warnings
+- `DebugInfo` - Raw output from `info` command (for troubleshooting)
 
 ---
 
@@ -195,6 +213,28 @@ Most devices support method 1. Methods 2 and 3 are fallbacks for edge cases.
 - **Posh-SSH module** (auto-installed if missing)
 - **Network access** to target devices via SSH (TCP/22)
 - **Controller access** (for Migrate/Adopt modes)
+
+---
+
+## Version History
+
+### v2.1.0 (Current)
+**Major fix: SSH Shell Streams for UniFi builtins**
+- Fixed critical bug where `info`, `set-inform`, and `mca-cli-op` commands didn't work
+- Replaced `Invoke-SSHCommand` (exec channel) with SSH Shell Streams (interactive shell)
+- Added `mca-cli-op set-inform` fallback (works on already-adopted devices and newer firmware)
+- More lenient response validation (accepts non-standard output if no errors detected)
+- Added `DebugInfo` column with raw `info` output for troubleshooting
+- Added `InformMethod` column to show which set-inform method succeeded
+- Better error handling for ANSI escape codes and shell prompt variations
+
+**What was broken in v2.0.0:**
+- MAC addresses populated correctly (because `cat /sys/class/net/eth0/address` is a real file)
+- Model/Firmware showed "-" for all devices (because `info` builtin didn't execute)
+- `set-inform` often returned "unexpected output" (because the command failed silently)
+
+### v2.0.0
+- Initial release with multi-credential support, factory reset, parallel scanning
 
 ---
 
