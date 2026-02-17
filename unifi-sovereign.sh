@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -123,15 +123,18 @@ _rule() {
   echo ""
 }
 
-# Banner — glass panel, restrained
+# Banner — three descending triangles, each in an accent color
 _banner() {
   echo ""
-  echo -e "  ${C_GLD}╭───────────────────────────────────────╮${RST}"
-  echo -e "  ${C_GLD}│${RST}                                       ${C_GLD}│${RST}"
-  echo -e "  ${C_GLD}│${RST}   ${C_TXT}${C_BLD}UniFi Sovereign${RST}   ${C_DIM}v${SCRIPT_VERSION}${RST}             ${C_GLD}│${RST}"
-  echo -e "  ${C_GLD}│${RST}   ${C_DIM}SSH Device Migration & Adoption${RST}     ${C_GLD}│${RST}"
-  echo -e "  ${C_GLD}│${RST}                                       ${C_GLD}│${RST}"
-  echo -e "  ${C_GLD}╰───────────────────────────────────────╯${RST}"
+  echo -e "  ${C_CYN}      ▄████████████████████████▄${RST}"
+  echo -e "  ${C_CYN}       ▀██████████████████████▀${RST}        ${C_TXT}${C_BLD}UNIFI SOVEREIGN${RST}"
+  echo -e "  ${C_CYN}          ▀▀██████████████▀▀${RST}           ${C_GLD}━━━━━━━━━━━━━━━${RST}"
+  echo -e "  ${C_GLD}        ▄██████████████████████▄${RST}       ${C_DIM}v${SCRIPT_VERSION}${RST}"
+  echo -e "  ${C_GLD}         ▀██████████████████▀${RST}"
+  echo -e "  ${C_GLD}            ▀▀██████████▀▀${RST}             ${C_DIM}SSH Device Migration${RST}"
+  echo -e "  ${C_RED}          ▄████████████████████▄${RST}       ${C_DIM}& Adoption${RST}"
+  echo -e "  ${C_RED}           ▀████████████████▀${RST}"
+  echo -e "  ${C_RED}              ▀▀████████▀▀${RST}"
   echo ""
 }
 
@@ -343,12 +346,12 @@ check_prerequisites() {
   for tool in $required_tools; do
     local dots=""
     local name_len=${#tool}
-    local dot_count=$((20 - name_len))
+    local dot_count=$((22 - name_len))
     local d=0; while [ "$d" -lt "$dot_count" ]; do dots="${dots}·"; d=$((d+1)); done
     if _has "$tool"; then
-      echo -e "  ${C_GRN}●${RST} ${C_TXT}${tool}${RST} ${C_MUT}${dots}${RST} ${C_GRN}installed${RST}"
+      echo -e "  ${C_GRN}●${RST} ${C_CYN}${tool}${RST} ${C_MUT}${dots}${RST} ${C_GRN}installed${RST}"
     else
-      echo -e "  ${C_RED}●${RST} ${C_TXT}${tool}${RST} ${C_MUT}${dots}${RST} ${C_RED}missing${RST}"
+      echo -e "  ${C_RED}●${RST} ${C_CYN}${tool}${RST} ${C_MUT}${dots}${RST} ${C_RED}missing${RST}"
       missing_required="${missing_required} ${tool}"
     fi
   done
@@ -358,12 +361,12 @@ check_prerequisites() {
   for tool in $optional_tools; do
     local dots=""
     local name_len=${#tool}
-    local dot_count=$((20 - name_len))
+    local dot_count=$((22 - name_len))
     local d=0; while [ "$d" -lt "$dot_count" ]; do dots="${dots}·"; d=$((d+1)); done
     if _has "$tool"; then
-      echo -e "  ${C_GRN}●${RST} ${C_TXT}${tool}${RST} ${C_MUT}${dots}${RST} ${C_GRN}installed${RST}"
+      echo -e "  ${C_GRN}●${RST} ${C_GLD}${tool}${RST} ${C_MUT}${dots}${RST} ${C_GRN}installed${RST}"
     else
-      echo -e "  ${C_MUT}○ ${tool} ${dots} not found (optional)${RST}"
+      echo -e "  ${C_MUT}○${RST} ${C_GLD}${tool}${RST} ${C_MUT}${dots} not found ${C_DIM}(optional)${RST}"
       missing_optional="${missing_optional} ${tool}"
     fi
   done
@@ -421,7 +424,12 @@ _menu() {
 
   if _has fzf; then
     local selected
-    selected=$(printf '%s\n' "${options[@]}" | fzf --height=40% --border --prompt="  ${prompt} " --no-preview)
+    selected=$(printf '%s\n' "${options[@]}" | fzf \
+      --height=40% \
+      --border=rounded \
+      --prompt="  ${prompt} " \
+      --no-preview \
+      --color='bg+:#0f345f,fg:#8fa1b3,fg+:#f7f0f5,hl:#92140c,hl+:#decbb7,pointer:#92140c,marker:#2f9d6e,spinner:#47b7d8,header:#47b7d8,border:#decbb7,prompt:#decbb7,info:#7a869a')
     echo "$selected"
     return 0
   fi
@@ -881,14 +889,14 @@ main() {
 
   # ── Plan ──
   _rule "Plan"
-  echo -e "  ${C_DIM}Mode${RST}         ${C_TXT}${MODE}${RST}"
-  echo -e "  ${C_DIM}Targets${RST}      ${C_TXT}${#target_ips[@]} IPs${RST}"
+  echo -e "  ${C_GLD}▸${RST} ${C_DIM}Mode${RST}         ${C_CYN}${C_BLD}${MODE}${RST}"
+  echo -e "  ${C_GLD}▸${RST} ${C_DIM}Targets${RST}      ${C_TXT}${#target_ips[@]} IPs${RST}"
   if [ -n "$controller_url" ]; then
-    echo -e "  ${C_DIM}Controller${RST}   ${C_TXT}${CONTROLLER}${RST}"
+    echo -e "  ${C_GLD}▸${RST} ${C_DIM}Controller${RST}   ${C_CYN}${CONTROLLER}${RST}"
   fi
-  [ "$RESET_FIRST" -eq 1 ] && echo -e "  ${C_DIM}Reset${RST}        ${C_RED}YES${RST}"
-  echo -e "  ${C_DIM}SSH Timeout${RST}  ${C_TXT}${SSH_TIMEOUT}s${RST}"
-  echo -e "  ${C_DIM}Output${RST}       ${C_TXT}${OUT_CSV}${RST}"
+  [ "$RESET_FIRST" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Reset${RST}        ${C_RED}${C_BLD}YES${RST}"
+  echo -e "  ${C_GLD}▸${RST} ${C_DIM}SSH Timeout${RST}  ${C_TXT}${SSH_TIMEOUT}s${RST}"
+  echo -e "  ${C_GLD}▸${RST} ${C_DIM}Output${RST}       ${C_GLD}${OUT_CSV}${RST}"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo ""
@@ -1035,13 +1043,19 @@ main() {
 
   local total_processed=$((count_ok + count_check + count_fail))
 
-  echo -e "  ${C_DIM}Scanned${RST}          ${C_TXT}${total}${RST}"
-  echo -e "  ${C_DIM}SSH accessible${RST}   ${C_TXT}${total_processed}${RST}"
-  echo -e "  ${C_DIM}Successful${RST}       ${C_GRN}${count_ok}${RST}"
-  [ "$count_check" -gt 0 ] && echo -e "  ${C_DIM}Needs attention${RST}  ${C_WRN}${count_check}${RST}"
-  [ "$count_fail" -gt 0 ] && echo -e "  ${C_DIM}Failed${RST}           ${C_RED}${count_fail}${RST}"
-  echo ""
-  echo -e "  ${C_DIM}Output${RST}  ${C_GLD}${OUT_CSV}${RST}"
+  echo -e "  ${C_GLD}┌──────────────────────────────────┐${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Scanned${RST}          ${C_CYN}${C_BLD}${total}${RST}              ${C_GLD}│${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}SSH accessible${RST}   ${C_TXT}${total_processed}${RST}              ${C_GLD}│${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Successful${RST}       ${C_GRN}${C_BLD}${count_ok}${RST}              ${C_GLD}│${RST}"
+  if [ "$count_check" -gt 0 ]; then
+    echo -e "  ${C_GLD}│${RST}  ${C_DIM}Needs attention${RST}  ${C_WRN}${C_BLD}${count_check}${RST}              ${C_GLD}│${RST}"
+  fi
+  if [ "$count_fail" -gt 0 ]; then
+    echo -e "  ${C_GLD}│${RST}  ${C_DIM}Failed${RST}           ${C_RED}${C_BLD}${count_fail}${RST}              ${C_GLD}│${RST}"
+  fi
+  echo -e "  ${C_GLD}├──────────────────────────────────┤${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Output${RST}  ${C_GLD}${OUT_CSV}${RST}"
+  echo -e "  ${C_GLD}└──────────────────────────────────┘${RST}"
 
   echo ""
   case "$MODE" in
