@@ -726,9 +726,9 @@ main() {
   local target_ips=()
 
   if [ -n "$CIDR" ]; then
-    mapfile -t target_ips < <(cidr_to_ips "$CIDR")
+    while IFS= read -r _ip; do target_ips+=("$_ip"); done < <(cidr_to_ips "$CIDR")
   elif [ -n "$IPS_ARG" ]; then
-    mapfile -t target_ips < <(echo "$IPS_ARG" | tr ',' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    while IFS= read -r _ip; do target_ips+=("$_ip"); done < <(echo "$IPS_ARG" | tr ',' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
   else
     local input_type
     input_type=$(_menu "Target input:" \
@@ -737,10 +737,10 @@ main() {
     if echo "$input_type" | grep -qi "list"; then
       local ips_str
       ips_str=$(_input "IPs (comma-separated)")
-      mapfile -t target_ips < <(echo "$ips_str" | tr ',' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+      while IFS= read -r _ip; do target_ips+=("$_ip"); done < <(echo "$ips_str" | tr ',' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
     else
       CIDR=$(_input "CIDR (e.g. 192.168.1.0/24)")
-      mapfile -t target_ips < <(cidr_to_ips "$CIDR")
+      while IFS= read -r _ip; do target_ips+=("$_ip"); done < <(cidr_to_ips "$CIDR")
     fi
   fi
 
@@ -829,7 +829,8 @@ main() {
 
   # ── Port Scan ──
   local open_hosts=()
-  mapfile -t open_hosts < <(_port_scan "${target_ips[@]}")
+  local open_hosts=()
+  while IFS= read -r _ip; do open_hosts+=("$_ip"); done < <(_port_scan "${target_ips[@]}")
 
   # ── Process Devices ──
   _rule "Processing (${MODE})"
