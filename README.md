@@ -30,7 +30,7 @@ A cross-platform PowerShell toolkit for UniFi device migration and adoption via 
 ### Interactive Mode (recommended for first run)
 
 ```powershell
-.\UniFi-MicroPlus.ps1
+.\unifi-sovereign.ps1
 ```
 
 Follow the prompts to select mode, targets, credentials, and options.
@@ -38,24 +38,24 @@ Follow the prompts to select mode, targets, credentials, and options.
 ### One-Liner (remote execution)
 
 ```powershell
-irm https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/UniFi-MicroPlus.ps1 | iex
+irm https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1 | iex
 ```
 
 ### Command-Line Examples
 
 **Migrate a /24 subnet to new controller:**
 ```powershell
-.\UniFi-MicroPlus.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -Username admin -Password ubnt
+.\unifi-sovereign.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -Username admin -Password ubnt
 ```
 
 **Adopt specific devices with factory reset:**
 ```powershell
-.\UniFi-MicroPlus.ps1 -Mode Adopt -IPs "192.168.1.10,192.168.1.11,192.168.1.12" -Controller 10.0.0.5 -ResetFirst
+.\unifi-sovereign.ps1 -Mode Adopt -IPs "192.168.1.10,192.168.1.11,192.168.1.12" -Controller 10.0.0.5 -ResetFirst
 ```
 
 **Sanity check (read-only scan):**
 ```powershell
-.\UniFi-MicroPlus.ps1 -Mode Sanity -Cidr 172.16.5.0/24
+.\unifi-sovereign.ps1 -Mode Sanity -Cidr 172.16.5.0/24
 ```
 
 ---
