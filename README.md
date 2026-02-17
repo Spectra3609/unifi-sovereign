@@ -23,6 +23,40 @@ See [PLATFORMS.md](PLATFORMS.md) for setup details per platform.
 
 ---
 
+## Installation
+
+### One-Line Install
+
+Download and run directly from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh -o unifi-sovereign.sh && chmod +x unifi-sovereign.sh
+```
+
+Or with `wget`:
+
+```bash
+wget -qO unifi-sovereign.sh https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh && chmod +x unifi-sovereign.sh
+```
+
+### Run Without Saving
+
+Pipe directly into bash for one-off use:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh)
+```
+
+### Clone the Repository
+
+```bash
+git clone https://github.com/Spectra3609/unifi-sovereign.git
+cd unifi-sovereign
+chmod +x unifi-sovereign.sh
+```
+
+---
+
 ## Quick Start
 
 ### Interactive (recommended)
