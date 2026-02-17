@@ -802,8 +802,15 @@ main() {
     MODE=$(_menu "Operation mode:" \
       "SANITY   — verify SSH access, collect device info (read-only)" \
       "MIGRATE  — re-point devices to a new controller (no reset)" \
-      "ADOPT    — full adoption with optional factory reset")
+      "ADOPT    — full adoption with optional factory reset" \
+      "EXIT     — quit")
     MODE=$(echo "$MODE" | awk '{print $1}')
+    if [ "$MODE" = "EXIT" ]; then
+      echo ""
+      _info "Exited."
+      echo ""
+      exit 0
+    fi
   fi
   MODE=$(echo "$MODE" | tr '[:lower:]' '[:upper:]')
 
@@ -821,7 +828,14 @@ main() {
     local input_type
     input_type=$(_menu "Target input:" \
       "CIDR subnet  (e.g. 192.168.1.0/24)" \
-      "IP list      (comma-separated)")
+      "IP list      (comma-separated)" \
+      "EXIT")
+    if echo "$input_type" | grep -qi "EXIT"; then
+      echo ""
+      _info "Exited."
+      echo ""
+      exit 0
+    fi
     if echo "$input_type" | grep -qi "list"; then
       local ips_str
       ips_str=$(_input "IPs (comma-separated)")
