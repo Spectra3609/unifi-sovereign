@@ -27,35 +27,63 @@ A cross-platform PowerShell toolkit for UniFi device migration and adoption via 
 
 ## Quick Start
 
+### Choose Your Version
+
+**Windows?** → Use PowerShell version  
+**macOS/Linux?** → Use Bash/Zsh version
+
+See [PLATFORMS.md](PLATFORMS.md) for detailed comparison and setup.
+
 ### Interactive Mode (recommended for first run)
 
+**Windows (PowerShell):**
 ```powershell
 .\unifi-sovereign.ps1
+```
+
+**macOS/Linux (Bash):**
+```bash
+./unifi-sovereign.sh
 ```
 
 Follow the prompts to select mode, targets, credentials, and options.
 
 ### One-Liner (remote execution)
 
+**PowerShell (Windows):**
 ```powershell
 irm https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1 | iex
 ```
 
+**Bash (macOS/Linux):**
+```bash
+curl -sSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh | bash
+```
+
 ### Command-Line Examples
 
-**Migrate a /24 subnet to new controller:**
+**PowerShell:**
 ```powershell
+# Migrate a /24 subnet to new controller
 .\unifi-sovereign.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -Username admin -Password ubnt
-```
 
-**Adopt specific devices with factory reset:**
-```powershell
+# Adopt specific devices with factory reset
 .\unifi-sovereign.ps1 -Mode Adopt -IPs "192.168.1.10,192.168.1.11,192.168.1.12" -Controller 10.0.0.5 -ResetFirst
+
+# Sanity check (read-only scan)
+.\unifi-sovereign.ps1 -Mode Sanity -Cidr 172.16.5.0/24
 ```
 
-**Sanity check (read-only scan):**
-```powershell
-.\unifi-sovereign.ps1 -Mode Sanity -Cidr 172.16.5.0/24
+**Bash:**
+```bash
+# Migrate a /24 subnet to new controller
+./unifi-sovereign.sh --mode MIGRATE --cidr 192.168.1.0/24 --controller 10.0.0.5
+
+# Adopt specific devices with factory reset
+./unifi-sovereign.sh --mode ADOPT --ips 192.168.1.10,192.168.1.11,192.168.1.12 --controller 10.0.0.5 --reset
+
+# Sanity check (read-only scan)
+./unifi-sovereign.sh --mode SANITY --cidr 172.16.5.0/24
 ```
 
 ---
@@ -209,9 +237,18 @@ Most devices support method 1. Methods 2 and 3 are fallbacks for edge cases.
 
 ## Requirements
 
+### PowerShell Version (Windows / PowerShell 7+)
 - **PowerShell 5.1+** (Windows) or **PowerShell 7+** (macOS/Linux)
 - **Posh-SSH module** (auto-installed if missing)
 - **Network access** to target devices via SSH (TCP/22)
+
+### Bash/Zsh Version (macOS/Linux)
+- **Bash 4.0+** or **Zsh** (pre-installed on macOS/Linux)
+- **Standard Unix tools:** ssh, sshpass, grep, awk, sed
+- **Optional:** fzf (better interactive menus), ipcalc (CIDR parsing), expect (shell commands)
+- **Network access** to target devices via SSH (TCP/22)
+
+**All versions require:**
 - **Controller access** (for Migrate/Adopt modes)
 
 ---
