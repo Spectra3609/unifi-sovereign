@@ -54,15 +54,20 @@ log_header() {
 
 print_banner() {
   echo ""
-  echo "  ============================================================"
-  echo "   _   _       _ _____ _   __  __ _            ____  _       "
-  echo "  | | | |_ __ (_)  ___(_) |  \/  (_) ___ _ __ |  _ \| |_   _ ___ "
-  echo "  | | | | '_ \| | |_  | | | |\/| | |/ __| '__ \| |_) | | | | / __|"
-  echo "  | |_| | | | | |  _| | | | |  | | | (__| |  | |  __/| | |_| \__ \\"
-  echo "   \___/|_| |_|_|_|   |_| |_|  |_|_|\___|_|  |_|_|   |_|\__,_|___/"
+  echo "  ${CYAN}════════════════════════════════════════════════════════════${NC}"
   echo ""
-  echo "   SSH Inform Toolkit (Bash/Zsh)                 v${SCRIPT_VERSION}"
-  echo "  ============================================================"
+  echo "                   ${BOLD}UniFi Sovereign${NC}"
+  echo ""
+  echo "                    ${CYAN}▼ ▼ ▼${NC}"
+  echo "                   ${CYAN}▼   ▼   ▼${NC}"
+  echo "                  ${CYAN}▼       ▼${NC}"
+  echo ""
+  echo "          ${DIM}Hunt. Claim. Adopt.${NC}"
+  echo ""
+  echo "       SSH Device Migration & Adoption Toolkit"
+  echo "                   v${SCRIPT_VERSION}"
+  echo ""
+  echo "  ${CYAN}════════════════════════════════════════════════════════════${NC}"
   echo ""
 }
 

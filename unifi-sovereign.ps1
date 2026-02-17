@@ -96,20 +96,22 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
 # ===================================================================
 
 function Write-Banner {
-    $lines = @(
-        "",
-        "  ============================================================",
-        "   _   _       _ _____ _   __  __ _            ____  _       ",
-        "  | | | |_ __ (_)  ___(_) |  \/  (_) ___ _ __ |  _ \| |_   _ ___ ",
-        "  | | | | '_ \| | |_  | | | |\/| | |/ __| '__ \| |_) | | | | / __|",
-        "  | |_| | | | | |  _| | | | |  | | | (__| |  | |  __/| | |_| \__ \",
-        "   \___/|_| |_|_|_|   |_| |_|  |_|_|\___|_|  |_|_|   |_|\__,_|___/",
-        "",
-        "   SSH Inform Toolkit                              v$($script:ScriptVersion)",
-        "  ============================================================",
-        ""
-    )
-    foreach ($line in $lines) { Write-Host $line -ForegroundColor DarkCyan }
+    Write-Host ""
+    Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "                   UniFi Sovereign" -ForegroundColor White -BackgroundColor Black
+    Write-Host ""
+    Write-Host "                    ▼ ▼ ▼" -ForegroundColor Cyan
+    Write-Host "                   ▼   ▼   ▼" -ForegroundColor Cyan
+    Write-Host "                  ▼       ▼" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "          Hunt. Claim. Adopt." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "       SSH Device Migration & Adoption Toolkit"
+    Write-Host "                   v$($script:ScriptVersion)"
+    Write-Host ""
+    Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
 }
 
 function Write-Step {
