@@ -1,64 +1,40 @@
-# UniFi Sovereign — Platform Versions
+# UniFi Sovereign — Platform Setup
 
-Choose the right version for your OS:
+## macOS / Linux (Bash/Zsh) — `unifi-sovereign.sh`
 
-## Windows (PowerShell)
+**Recommended version** for macOS and Linux environments.
 
-**File:** `unifi-sovereign.ps1`
+### Requirements
 
-**Requires:**
-- PowerShell 5.1+ (Windows) or 7+ (if on Windows)
-- Posh-SSH module (auto-installs)
-- Internet connection (first run)
+- Bash 3.2+ (macOS default) or Bash 4.0+ / Zsh
+- Network access to target devices (TCP/22)
+- `python3` (for CIDR expansion)
 
-**Features:**
-- Parallel TCP/22 scanning
-- Interactive prompts with validation
-- Full factory reset cascade (3 methods)
-- Comprehensive CSV output with DebugInfo column
-- Shell stream support for UniFi builtins
+### Automatic Dependency Management
 
-**Run:**
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\unifi-sovereign.ps1
-```
+The script detects your platform and offers to install missing tools:
 
----
+**macOS:**
+- Checks for Homebrew; offers to install if missing
+- Installs via `brew install`
 
-## macOS / Linux (Bash/Zsh)
+**Linux:**
+- Detects package manager (apt, dnf, pacman, apk)
+- Installs via appropriate package manager with `sudo`
 
-**File:** `unifi-sovereign.sh`
+### Dependencies
 
-**Requires:**
-- Bash 4.0+ or Zsh (macOS has both pre-installed)
-- Standard Unix tools: `ssh`, `sshpass`, `grep`, `awk`, `sed`
-- Optional: `fzf` (for better interactive menus)
-- Optional: `ipcalc` (for CIDR expansion; falls back to Python)
-- Optional: `expect` (for better shell command execution)
+| Tool | Required | Purpose | macOS | Debian/Ubuntu |
+|------|----------|---------|-------|---------------|
+| ssh | Yes | Device communication | Pre-installed | `openssh-client` |
+| sshpass | Yes | Password-based SSH | `brew install sshpass` | `apt install sshpass` |
+| python3 | Yes | CIDR expansion | Pre-installed | `apt install python3` |
+| grep/awk/sed | Yes | Output parsing | Pre-installed | Pre-installed |
+| fzf | No | Interactive menus | `brew install fzf` | `apt install fzf` |
+| expect | No | Shell stream execution | `brew install expect` | `apt install expect` |
 
-**Features:**
-- ANSI color output (works in Terminal.app, iTerm2, Linux terminals)
-- Interactive menus (with fzf if installed, else numbered)
-- Port scanning with progress indicator
-- Full CSV output with DebugInfo column
-- Cross-platform compatible
+### Run
 
-**Install Dependencies:**
-
-**macOS (Homebrew):**
-```bash
-brew install openssh ssh-keyscan  # Core
-brew install fzf ipcalc expect    # Optional (nice to have)
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install openssh-client openssh-server  # Core
-sudo apt-get install sshpass fzf ipcalc expect      # Optional
-```
-
-**Run:**
 ```bash
 chmod +x unifi-sovereign.sh
 ./unifi-sovereign.sh
@@ -66,91 +42,44 @@ chmod +x unifi-sovereign.sh
 
 ---
 
-## Comparison
+## Windows (PowerShell) — `unifi-sovereign.ps1`
 
-| Feature | PowerShell | Bash/Zsh |
-|---------|-----------|----------|
-| **Platforms** | Windows, macOS, Linux | macOS, Linux |
-| **Interactive Menus** | Built-in UI | CLI (enhanced with fzf) |
-| **Parallel Scanning** | Yes (runspaces) | Sequential (fast enough) |
-| **Shell Streams** | Posh-SSH | Expect (if available) |
-| **CIDR Parsing** | Built-in | ipcalc or Python fallback |
-| **CSV Output** | Full | Full |
-| **Color Output** | Limited | ANSI (rich) |
-| **Package Mgmt** | PowerShell Gallery | Homebrew / APT |
+### Requirements
+
+- PowerShell 5.1+ (Windows) or PowerShell 7+ (cross-platform)
+- Posh-SSH module (auto-installed on first run)
+
+### Run
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\unifi-sovereign.ps1
+```
+
+---
+
+## Feature Comparison
+
+| Feature | Bash v3.0.0 | PowerShell v2.1.0 |
+|---------|-------------|-------------------|
+| Auto-install dependencies | Yes | Posh-SSH only |
+| Homebrew detection (macOS) | Yes | N/A |
+| Interactive menus | CLI / fzf | Built-in |
+| Progress indicators | Progress bar | Percentage |
+| Parallel scanning | Sequential | Runspaces |
+| Shell streams | expect / pipe | Posh-SSH |
+| Color output | ANSI (auto-detect) | Limited |
+| CSV output | Full | Full |
+| Dry-run mode | Yes | No |
+| Verbose/quiet modes | Yes | No |
+| Color toggle | `--no-color` | N/A |
 
 ---
 
 ## Recommended Setup
 
-### Development / Homelab
-- **Primary:** Bash version on a Linux VM or macOS
-- **Fallback:** PowerShell version if you have a Windows machine
-- Run from a central spot with SSH access to all UniFi devices
+**macOS/Linux development or homelab:** Bash version. Run from a machine with SSH access to all UniFi devices.
 
-### Production / Enterprise
-- Use **PowerShell version on Windows** (more mature, tested)
-- Run from a bastion host or admin workstation
-- Schedule runs via Task Scheduler / cron
+**Windows administration:** PowerShell version. Run from admin workstation or bastion host.
 
-### Quick Testing
-- **macOS/Linux:** Bash version (already have ssh)
-- **Windows:** PowerShell version (no extra installs needed after Posh-SSH)
-
----
-
-## Troubleshooting
-
-### "ssh: command not found"
-- **macOS:** `brew install openssh`
-- **Linux:** `sudo apt-get install openssh-client`
-- **Windows:** Use PowerShell version instead
-
-### "sshpass: command not found"
-- **macOS:** `brew install sshpass`
-- **Linux:** `sudo apt-get install sshpass`
-- Note: If you have SSH keys configured, sshpass is optional
-
-### "fzf not found (interactive menus disabled)"
-- This is optional. Script falls back to numbered menus.
-- To enable: `brew install fzf` (macOS) or `apt-get install fzf` (Linux)
-
-### SSH Key Auth Instead of Passwords
-Both versions support SSH keys. Set up your `.ssh/config`:
-```
-Host 192.168.*
-  User ubnt
-  IdentityFile ~/.ssh/unifi_key
-  StrictHostKeyChecking no
-```
-
-Then run **Bash version** without `--password`:
-```bash
-./unifi-sovereign.sh --mode SANITY --cidr 192.168.1.0/24
-```
-
----
-
-## Version History
-
-### v2.1.0 (Both)
-- SSH Shell Streams for UniFi builtins (info/set-inform/mca-cli-op)
-- Added mca-cli-op fallback (works on already-adopted devices)
-- DebugInfo column with raw command output
-- Better error handling and validation
-
-### v2.0.0
-- PowerShell version (Windows-only initially)
-- Multi-credential rotation
-- Factory reset cascade
-- CSV logging
-
----
-
-## Contributing
-
-**Issues specific to:**
-- **PowerShell:** Check Posh-SSH version, Windows firewall
-- **Bash/Zsh:** Check ssh version, sshpass installation, target device shell
-
-Always run `--help` first to verify your environment is ready.
+**CI/automation:** Bash version with `--mode`, `--cidr`, `--controller` flags. Combine with `--no-color` and `--quiet` for clean log output.
