@@ -819,7 +819,8 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         # SANITY
         if ($modeStr -eq "Sanity") {
             $row.Status = "OK"; $countOk++
-            Write-DeviceLine $ip $devInfo.Model "OK" ($devInfo.AdoptStatus ?? "unknown")
+            $adoptDisplay = if ($devInfo.AdoptStatus) { $devInfo.AdoptStatus } else { "unknown" }
+            Write-DeviceLine $ip $devInfo.Model "OK" $adoptDisplay
             if ($stream) { $stream.Dispose() }
             Remove-SSHSession -SessionId $sess.SessionId | Out-Null
             $results += [pscustomobject]$row; continue
