@@ -25,26 +25,32 @@ See [PLATFORMS.md](PLATFORMS.md) for setup details per platform.
 
 ## Installation
 
-### One-Line Install
+### macOS / Linux (Bash)
 
-Download and run directly from GitHub:
+**Download and run:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh -o unifi-sovereign.sh && chmod +x unifi-sovereign.sh
 ```
 
-Or with `wget`:
-
-```bash
-wget -qO unifi-sovereign.sh https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh && chmod +x unifi-sovereign.sh
-```
-
-### Run Without Saving
-
-Pipe directly into bash for one-off use:
+**One-off (no file saved):**
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.sh)
+```
+
+### Windows (PowerShell)
+
+**Download and run:**
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1" -OutFile "unifi-sovereign.ps1"; .\unifi-sovereign.ps1
+```
+
+**One-off (no file saved):**
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass; iex (irm "https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1")
 ```
 
 ### Clone the Repository
@@ -52,7 +58,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/
 ```bash
 git clone https://github.com/Spectra3609/unifi-sovereign.git
 cd unifi-sovereign
-chmod +x unifi-sovereign.sh
 ```
 
 ---
@@ -61,29 +66,42 @@ chmod +x unifi-sovereign.sh
 
 ### Interactive (recommended)
 
+**macOS / Linux:**
 ```bash
 ./unifi-sovereign.sh
 ```
 
-The script detects missing dependencies and offers to install them automatically.
+**Windows:**
+```powershell
+.\unifi-sovereign.ps1
+```
+
+Both versions detect missing dependencies and offer to install them automatically.
 
 ### Command-Line
 
+**macOS / Linux:**
 ```bash
-# Migrate a subnet
 ./unifi-sovereign.sh --mode MIGRATE --cidr 192.168.1.0/24 --controller 10.0.0.5
-
-# Sanity check specific IPs
 ./unifi-sovereign.sh --mode SANITY --ips 192.168.1.100,192.168.1.101
-
-# Adopt with factory reset
 ./unifi-sovereign.sh --mode ADOPT --cidr 10.0.1.0/24 --controller 10.0.0.5 --reset
+```
+
+**Windows:**
+```powershell
+.\unifi-sovereign.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5
+.\unifi-sovereign.ps1 -Mode Sanity -IPs "192.168.1.100,192.168.1.101"
+.\unifi-sovereign.ps1 -Mode Adopt -Cidr 10.0.1.0/24 -Controller 10.0.0.5 -ResetFirst
 ```
 
 ### Dry Run
 
 ```bash
 ./unifi-sovereign.sh --mode MIGRATE --cidr 192.168.1.0/24 --controller 10.0.0.5 --dry-run
+```
+
+```powershell
+.\unifi-sovereign.ps1 -Mode Migrate -Cidr 192.168.1.0/24 -Controller 10.0.0.5 -DryRun
 ```
 
 Shows the full execution plan without making any changes.
