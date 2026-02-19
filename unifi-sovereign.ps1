@@ -81,6 +81,8 @@ param(
     [int]$Parallel = 128,
     [string]$OutCsv,
     [switch]$DryRun,
+    [switch]$Verbose_,
+    [switch]$Quiet_,
     [switch]$NoColor,
     [switch]$ShowVersion
 )
@@ -110,7 +112,23 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
 
 # ===================================================================
 # PALETTE
+#
+# Deep navy base, surgical red accent, muted gold secondary.
+# True-color (24-bit) ANSI with automatic 16-color fallback.
 # ===================================================================
+
+$script:ESC = [char]27
+
+function Test-TrueColorSupport {
+    if ($env:COLORTERM -in @('truecolor','24bit')) { return $true }
+    if ($env:TERM -match '256color|direct') { return $true }
+    if ($env:WT_SESSION) { return $true }
+    if ($PSVersionTable.PSVersion.Major -ge 7) { return $true }
+    return $false
+}
+
+$script:TrueColor = $false
+if ($script:UseColor) { $script:TrueColor = Test-TrueColorSupport }
 
 function Write-C {
     param(
@@ -122,6 +140,47 @@ function Write-C {
         Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
     } else {
         Write-Host $Text -NoNewline:$NoNewline
+    }
+}
+
+# Write raw ANSI text to console
+function Write-A {
+    param([string]$Text, [switch]$NoNewline)
+    if ($NoNewline) { [Console]::Write($Text) } else { [Console]::WriteLine($Text) }
+}
+
+# Get ANSI color escape code
+function Get-Ansi([string]$Name) {
+    if (-not $script:UseColor) { return "" }
+    $e = $script:ESC
+    if ($script:TrueColor) {
+        switch ($Name) {
+            'RED' { "$e[38;2;146;20;12m" }
+            'GRN' { "$e[38;2;47;157;110m" }
+            'GLD' { "$e[38;2;222;203;183m" }
+            'CYN' { "$e[38;2;71;183;216m" }
+            'MUT' { "$e[38;2;122;134;154m" }
+            'WRN' { "$e[38;2;215;177;87m" }
+            'TXT' { "$e[38;2;247;240;245m" }
+            'DIM' { "$e[38;2;143;161;179m" }
+            'BLD' { "$e[1m" }
+            'RST' { "$e[0m" }
+            default { "$e[0m" }
+        }
+    } else {
+        switch ($Name) {
+            'RED' { "$e[31m" }
+            'GRN' { "$e[32m" }
+            'GLD' { "$e[33m" }
+            'CYN' { "$e[36m" }
+            'MUT' { "$e[37m" }
+            'WRN' { "$e[1;33m" }
+            'TXT' { "$e[37m" }
+            'DIM' { "$e[2m" }
+            'BLD' { "$e[1m" }
+            'RST' { "$e[0m" }
+            default { "$e[0m" }
+        }
     }
 }
 
@@ -147,32 +206,66 @@ function Write-Rule {
 }
 
 function Write-Banner {
-    Write-Host ""
-    Write-C "        ▄████████████████████████▄" "Cyan"
-    Write-C "         ▀██████████████████████▀" "Cyan" -NoNewline
-    Write-C "        UNIFI SOVEREIGN" "White"
-    Write-C "            ▀▀██████████████▀▀" "Cyan" -NoNewline
-    Write-C "           " "DarkYellow" -NoNewline
-    Write-C "━━━━━━━━━━━━━━━" "DarkYellow"
-    Write-C "          ▄██████████████████████▄" "DarkYellow" -NoNewline
-    Write-C "       v$($script:ScriptVersion)" "DarkGray"
-    Write-C "           ▀██████████████████▀" "DarkYellow"
-    Write-C "              ▀▀██████████▀▀" "DarkYellow" -NoNewline
-    Write-C "             SSH Device Migration" "DarkGray"
-    Write-C "            ▄████████████████████▄" "Red" -NoNewline
-    Write-C "       & Adoption" "DarkGray"
-    Write-C "             ▀████████████████▀" "Red"
-    Write-C "                ▀▀████████▀▀" "Red"
-    Write-Host ""
+    if ($script:TrueColor) {
+        $c = Get-Ansi 'CYN'; $g = Get-Ansi 'GLD'; $r = Get-Ansi 'RED'
+        $t = Get-Ansi 'TXT'; $d = Get-Ansi 'DIM'; $b = Get-Ansi 'BLD'
+        $x = Get-Ansi 'RST'
+        Write-A ""
+        Write-A "  ${c}      ▄████████████████████████▄${x}"
+        Write-A "  ${c}       ▀██████████████████████▀${x}        ${t}${b}UNIFI SOVEREIGN${x}"
+        Write-A "  ${c}          ▀▀██████████████▀▀${x}           ${g}━━━━━━━━━━━━━━━${x}"
+        Write-A "  ${g}        ▄██████████████████████▄${x}       ${d}v$($script:ScriptVersion)${x}"
+        Write-A "  ${g}         ▀██████████████████▀${x}"
+        Write-A "  ${g}            ▀▀██████████▀▀${x}             ${d}SSH Device Migration${x}"
+        Write-A "  ${r}          ▄████████████████████▄${x}       ${d}& Adoption${x}"
+        Write-A "  ${r}           ▀████████████████▀${x}"
+        Write-A "  ${r}              ▀▀████████▀▀${x}"
+        Write-A ""
+    } else {
+        Write-Host ""
+        Write-C "        ▄████████████████████████▄" "Cyan"
+        Write-C "         ▀██████████████████████▀" "Cyan" -NoNewline
+        Write-C "        UNIFI SOVEREIGN" "White"
+        Write-C "            ▀▀██████████████▀▀" "Cyan" -NoNewline
+        Write-C "           " "DarkYellow" -NoNewline
+        Write-C "━━━━━━━━━━━━━━━" "DarkYellow"
+        Write-C "          ▄██████████████████████▄" "DarkYellow" -NoNewline
+        Write-C "       v$($script:ScriptVersion)" "DarkGray"
+        Write-C "           ▀██████████████████▀" "DarkYellow"
+        Write-C "              ▀▀██████████▀▀" "DarkYellow" -NoNewline
+        Write-C "             SSH Device Migration" "DarkGray"
+        Write-C "            ▄████████████████████▄" "Red" -NoNewline
+        Write-C "       & Adoption" "DarkGray"
+        Write-C "             ▀████████████████▀" "Red"
+        Write-C "                ▀▀████████▀▀" "Red"
+        Write-Host ""
+    }
 }
 
-function Write-Info  { param([string]$Text) Write-C "  ● " "Cyan" -NoNewline; Write-Host $Text }
+function Write-Info  { param([string]$Text) if (-not $Quiet_) { Write-C "  ● " "Cyan" -NoNewline; Write-Host $Text } }
 function Write-Ok    { param([string]$Text) Write-C "  ● " "Green" -NoNewline; Write-Host $Text }
 function Write-Warn  { param([string]$Text) Write-C "  ● " "Yellow" -NoNewline; Write-Host $Text }
 function Write-Fail  { param([string]$Text) Write-C "  ● " "Red" -NoNewline; Write-Host $Text }
-function Write-Opt   { param([string]$Text) Write-C "  ○ " "DarkGray" -NoNewline; Write-Host $Text }
-function Write-Item  { param([string]$Text) Write-C "  ▸ " "DarkYellow" -NoNewline; Write-Host $Text }
-function Write-Dbg   { param([string]$Text) Write-C "    ⌁ " "DarkGray" -NoNewline; Write-C $Text "DarkGray" }
+function Write-Opt   { param([string]$Text) if (-not $Quiet_) { Write-C "  ○ " "DarkGray" -NoNewline; Write-Host $Text } }
+function Write-Item  { param([string]$Text) if (-not $Quiet_) { Write-C "  ▸ " "DarkYellow" -NoNewline; Write-Host $Text } }
+function Write-Dbg   { param([string]$Text) if ($Verbose_) { Write-C "    ⌁ " "DarkGray" -NoNewline; Write-C $Text "DarkGray" } }
+
+# Custom progress bar — gold fill, muted empty (matches bash)
+function Write-ScanProgress {
+    param([int]$Current, [int]$Total, [string]$Label = "")
+    $width = 24
+    $pct = if ($Total -gt 0) { [Math]::Floor(($Current / $Total) * 100) } else { 0 }
+    $filled = [Math]::Floor($pct * $width / 100)
+    $empty  = $width - $filled
+    $barFill  = ([string][char]0x2501) * $filled   # ━
+    $barEmpty = ([string][char]0x254C) * $empty     # ╌
+    if ($script:TrueColor) {
+        $g = Get-Ansi 'GLD'; $m = Get-Ansi 'MUT'; $d = Get-Ansi 'DIM'; $x = Get-Ansi 'RST'
+        [Console]::Write("`r  ${d}${Label}${x}${g}${barFill}${x}${m}${barEmpty}${x}  ${d}$($pct.ToString().PadLeft(3))%  ${Current}/${Total}${x}  ")
+    } else {
+        Write-Host "`r  ${Label}${barFill}${barEmpty}  $($pct.ToString().PadLeft(3))%  ${Current}/${Total}  " -NoNewline
+    }
+}
 
 function Write-DepLine {
     param([string]$Name, [string]$Status, [string]$StatusColor, [string]$NameColor = "Cyan")
@@ -598,14 +691,13 @@ function Invoke-PortScan {
 
     foreach ($j in $jobs) {
         $done++
-        $pct = [Math]::Floor(($done / $jobTotal) * 100)
-        Write-Progress -Activity "Scanning TCP/22" -Status "$done/$jobTotal ($pct%)" -PercentComplete $pct
+        Write-ScanProgress -Current $done -Total $jobTotal
         try { $hit = $j.Handle.EndInvoke($j.Task) } catch { $hit = $null }
         $j.Handle.Dispose()
         if ($hit) { $open.Add($hit) | Out-Null }
     }
 
-    Write-Progress -Activity "Scanning TCP/22" -Completed
+    Write-Host ("`r" + (" " * 80) + "`r") -NoNewline  # clear progress line
     $pool.Close(); $pool.Dispose()
 
     Write-Host ""
@@ -921,13 +1013,19 @@ if ($csvDisplay.Length -gt ($cardWidth - 11)) { $csvDisplay = "..." + $csvDispla
 Write-C $csvDisplay.PadRight($cardWidth - 10) "DarkYellow" -NoNewline; Write-C "│" "DarkYellow"
 Write-C "  └$("─" * $cardWidth)┘" "DarkYellow"
 
-# Export CSV
-$results | Sort-Object IP | Export-Csv -NoTypeInformation -Path $OutCsv -ErrorAction SilentlyContinue -ErrorVariable csvErr
-if ($csvErr) {
+# Export CSV with metadata header
+try {
+    $metaLine = "# UniFi Sovereign v$($script:ScriptVersion) | Mode: $($modeStr.ToUpper()) | Targets: $total | Date: $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')"
+    Set-Content -Path $OutCsv -Value $metaLine -ErrorAction Stop
+    $results | Sort-Object IP | ConvertTo-Csv -NoTypeInformation | Select-Object -Skip 0 | Add-Content -Path $OutCsv
+} catch {
     $fallback = Get-DefaultCsvPath $modeStr
     Write-Warn "Cannot write to '$OutCsv' — trying '$fallback'"
-    $results | Sort-Object IP | Export-Csv -NoTypeInformation -Path $fallback -ErrorAction SilentlyContinue
-    $OutCsv = $fallback
+    try {
+        Set-Content -Path $fallback -Value $metaLine
+        $results | Sort-Object IP | ConvertTo-Csv -NoTypeInformation | Add-Content -Path $fallback
+        $OutCsv = $fallback
+    } catch { Write-Fail "CSV write failed: $($_.Exception.Message)" }
 }
 
 Write-Host ""
