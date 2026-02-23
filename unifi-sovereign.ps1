@@ -141,7 +141,7 @@ function Write-C {
         [string]$Color = "White",
         [switch]$NoNewline
     )
-    if ($script:UseColor) {
+    if ($script:UseColor -and $Color) {
         Write-Host $Text -ForegroundColor $Color -NoNewline:$NoNewline
     } else {
         Write-Host $Text -NoNewline:$NoNewline
