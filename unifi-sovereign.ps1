@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.2.0 — SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.2.0 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
-    SANITY  — read-only credential + info check
-    MIGRATE — re-point devices to a new controller (no reset)
-    ADOPT   — full adoption with optional factory reset
+    SANITY  -- read-only credential + info check
+    MIGRATE -- re-point devices to a new controller (no reset)
+    ADOPT   -- full adoption with optional factory reset
 
   Auto-installs Posh-SSH. Uses SSH Shell Streams for UniFi builtins.
 
@@ -62,7 +62,7 @@
   .\unifi-sovereign.ps1 -Mode Sanity -Cidr 10.0.1.0/24 -DryRun
 
 .NOTES
-  v3.2.0 — TUI overhaul, feature parity with bash/zsh version.
+  v3.2.0 -- TUI overhaul, feature parity with bash/zsh version.
   If execution policy blocks: Set-ExecutionPolicy -Scope Process Bypass
 #>
 
@@ -255,7 +255,7 @@ function Write-Opt   { param([string]$Text) if (-not $Quiet_) { Write-C "  o " "
 function Write-Item  { param([string]$Text) if (-not $Quiet_) { Write-C "  > " "DarkYellow" -NoNewline; Write-Host $Text } }
 function Write-Dbg   { param([string]$Text) if ($Verbose_) { Write-C "    ~ " "DarkGray" -NoNewline; Write-C $Text "DarkGray" } }
 
-# Custom progress bar — gold fill, muted empty (matches bash)
+# Custom progress bar -- gold fill, muted empty (matches bash)
 function Write-ScanProgress {
     param([int]$Current, [int]$Total, [string]$Label = "")
     $width = 24
@@ -293,7 +293,7 @@ function Write-DepLine {
 function Write-DeviceLine {
     param([string]$IP, [string]$Model, [string]$Status, [string]$Detail)
     $colIp = $IP.PadRight(16)
-    $colModel = if ($Model) { $Model.PadRight(14) } else { "—".PadRight(14) }
+    $colModel = if ($Model) { $Model.PadRight(14) } else { "--".PadRight(14) }
     $statusColor = switch ($Status) {
         "OK"    { "Green" }
         "CHECK" { "Yellow" }
@@ -722,20 +722,20 @@ function Invoke-PortScan {
 Write-Banner
 
 if ($DryRun) {
-    Write-Warn "DRY RUN — no changes will be made"
+    Write-Warn "DRY RUN -- no changes will be made"
     Write-Host ""
 }
 
 Install-Prerequisites
 
-# ── Mode ──
+# -- Mode --
 $modeStr = $Mode
 if (-not $modeStr) {
     $mc = Read-MenuChoice -Title "Operation mode:" -Options @(
-        "SANITY   — verify SSH access, collect device info (read-only)",
-        "MIGRATE  — re-point devices to a new controller (no reset)",
-        "ADOPT    — full adoption with optional factory reset",
-        "EXIT     — quit"
+        "SANITY   -- verify SSH access, collect device info (read-only)",
+        "MIGRATE  -- re-point devices to a new controller (no reset)",
+        "ADOPT    -- full adoption with optional factory reset",
+        "EXIT     -- quit"
     ) -Default 1
     switch ($mc) {
         1 { $modeStr = "Sanity" }
@@ -749,7 +749,7 @@ $modeStr = $modeStr.Substring(0,1).ToUpper() + $modeStr.Substring(1).ToLower()
 Write-Rule "Configuration"
 Write-Info "Mode: $($modeStr.ToUpper())"
 
-# ── Targets ──
+# -- Targets --
 $targetList = @()
 if ($Cidr) {
     try { $targetList = Get-IPsFromCidr $Cidr } catch { Write-Fail $_.Exception.Message; exit 1 }
@@ -774,7 +774,7 @@ if ($Cidr) {
 if ($targetList.Count -eq 0) { Write-Fail "No valid target IPs"; exit 1 }
 Write-Info "Targets: $($targetList.Count) IPs"
 
-# ── Controller ──
+# -- Controller --
 $informUrl = ""; $doReset = $false
 if ($modeStr -in @("Migrate","Adopt")) {
     if (-not $Controller) { $Controller = Read-NonEmpty "Target controller IP or hostname" }
@@ -791,7 +791,7 @@ if ($modeStr -in @("Migrate","Adopt")) {
     }
 }
 
-# ── Credentials ──
+# -- Credentials --
 Write-Rule "Credentials"
 $credSpec = @()
 if ($Username) {
@@ -808,16 +808,16 @@ $credSpec += @{u='ubnt'; p=(ConvertTo-SafeSecureString 'ubnt')}
 $credSpec += @{u='root'; p=(ConvertTo-SafeSecureString 'ubnt')}
 $credSpec += @{u='admin'; p=(ConvertTo-SafeSecureString 'ubnt')}
 
-$credChain = ($credSpec | ForEach-Object { $_.u }) -join ' → '
+$credChain = ($credSpec | ForEach-Object { $_.u }) -join ' -> '
 Write-Info "Credential chain: $credChain"
 
-# ── CSV ──
+# -- CSV --
 if (-not $OutCsv) {
     $defaultPath = Get-DefaultCsvPath $modeStr
     $OutCsv = Read-WithDefault "CSV output path" $defaultPath
 }
 
-# ── Plan ──
+# -- Plan --
 Write-Rule "Plan"
 Write-Item "Mode         $($modeStr.ToUpper())"
 Write-Item "Targets      $($targetList.Count) IPs"
@@ -825,24 +825,24 @@ if ($informUrl) {
     Write-Item "Controller   $Controller"
     Write-Item "Inform URL   $informUrl"
 }
-if ($doReset) { Write-C "  ▸ " "DarkYellow" -NoNewline; Write-C "Reset        " "" -NoNewline; Write-C "YES" "Red" }
+if ($doReset) { Write-C "  > " "DarkYellow" -NoNewline; Write-C "Reset        " "" -NoNewline; Write-C "YES" "Red" }
 Write-Item "SSH Timeout  ${SshTimeout}s"
 Write-Item "Parallel     $Parallel threads"
 Write-Item "Output       $OutCsv"
 
 if ($DryRun) {
     Write-Host ""
-    Write-Warn "DRY RUN — stopping before execution"
+    Write-Warn "DRY RUN -- stopping before execution"
     exit 0
 }
 
 Write-Host ""
 if ((Read-YesNo "Execute?" 'Y') -ne 'Y') { Write-Host ""; Write-Info "Aborted."; exit 0 }
 
-# ── Scan ──
+# -- Scan --
 $openHosts = Invoke-PortScan -Targets $targetList -TimeoutSec $ScanTimeout -MaxParallel $Parallel
 
-# ── Process ──
+# -- Process --
 Write-Rule "Processing"
 
 $credList = Build-CredList $credSpec
@@ -995,7 +995,7 @@ for ($idx = 0; $idx -lt $total; $idx++) {
     }
 }
 
-# ── Results ──
+# -- Results --
 Write-Rule "Results"
 
 $totalProcessed = $countOk + $countCheck + $countFail
@@ -1025,7 +1025,7 @@ try {
     $results | Sort-Object IP | ConvertTo-Csv -NoTypeInformation | Select-Object -Skip 0 | Add-Content -Path $OutCsv
 } catch {
     $fallback = Get-DefaultCsvPath $modeStr
-    Write-Warn "Cannot write to '$OutCsv' — trying '$fallback'"
+    Write-Warn "Cannot write to '$OutCsv' -- trying '$fallback'"
     try {
         Set-Content -Path $fallback -Value $metaLine
         $results | Sort-Object IP | ConvertTo-Csv -NoTypeInformation | Add-Content -Path $fallback
