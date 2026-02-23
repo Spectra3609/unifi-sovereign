@@ -87,6 +87,11 @@ param(
     [switch]$ShowVersion
 )
 
+# Force UTF-8 output if possible (PS 5.1 compat)
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+}
+
 $ErrorActionPreference = "Continue"
 $script:ScriptVersion = "3.2.0"
 $script:UseColor = -not $NoColor
@@ -195,12 +200,12 @@ function Write-Rule {
     if ($Label) {
         $pad = $width - $Label.Length - 5
         if ($pad -lt 2) { $pad = 2 }
-        Write-C "  ── " "DarkYellow" -NoNewline
+        Write-C "  -- " "DarkYellow" -NoNewline
         Write-C $Label "White" -NoNewline
         Write-C " " "DarkYellow" -NoNewline
-        Write-C ("─" * $pad) "DarkYellow"
+        Write-C ("-" * $pad) "DarkYellow"
     } else {
-        Write-C ("  " + ("─" * $width)) "DarkYellow"
+        Write-C ("  " + ("-" * $width)) "DarkYellow"
     }
     Write-Host ""
 }
@@ -211,44 +216,44 @@ function Write-Banner {
         $t = Get-Ansi 'TXT'; $d = Get-Ansi 'DIM'; $b = Get-Ansi 'BLD'
         $x = Get-Ansi 'RST'
         Write-A ""
-        Write-A "  ${c}      ▄████████████████████████▄${x}"
-        Write-A "  ${c}       ▀██████████████████████▀${x}        ${t}${b}UNIFI SOVEREIGN${x}"
-        Write-A "  ${c}          ▀▀██████████████▀▀${x}           ${g}━━━━━━━━━━━━━━━${x}"
-        Write-A "  ${g}        ▄██████████████████████▄${x}       ${d}v$($script:ScriptVersion)${x}"
-        Write-A "  ${g}         ▀██████████████████▀${x}"
-        Write-A "  ${g}            ▀▀██████████▀▀${x}             ${d}SSH Device Migration${x}"
-        Write-A "  ${r}          ▄████████████████████▄${x}       ${d}& Adoption${x}"
-        Write-A "  ${r}           ▀████████████████▀${x}"
-        Write-A "  ${r}              ▀▀████████▀▀${x}"
+        Write-A "  ${c}         /\                   ${x}"
+        Write-A "  ${c}        /  \                  ${x}        ${t}${b}UNIFI SOVEREIGN${x}"
+        Write-A "  ${c}       /____\                 ${x}           ${g}===============${x}"
+        Write-A "  ${g}          /\                  ${x}       ${d}v$($script:ScriptVersion)${x}"
+        Write-A "  ${g}         /  \                 ${x}"
+        Write-A "  ${g}        /____\                ${x}             ${d}SSH Device Migration${x}"
+        Write-A "  ${r}           /\                 ${x}       ${d}& Adoption${x}"
+        Write-A "  ${r}          /  \                ${x}"
+        Write-A "  ${r}         /____\               ${x}"
         Write-A ""
     } else {
         Write-Host ""
-        Write-C "        ▄████████████████████████▄" "Cyan"
-        Write-C "         ▀██████████████████████▀" "Cyan" -NoNewline
+        Write-C "           /\                   " "Cyan"
+        Write-C "          /  \                  " "Cyan" -NoNewline
         Write-C "        UNIFI SOVEREIGN" "White"
-        Write-C "            ▀▀██████████████▀▀" "Cyan" -NoNewline
+        Write-C "         /____\                 " "Cyan" -NoNewline
         Write-C "           " "DarkYellow" -NoNewline
-        Write-C "━━━━━━━━━━━━━━━" "DarkYellow"
-        Write-C "          ▄██████████████████████▄" "DarkYellow" -NoNewline
+        Write-C "===============" "DarkYellow"
+        Write-C "            /\                  " "DarkYellow" -NoNewline
         Write-C "       v$($script:ScriptVersion)" "DarkGray"
-        Write-C "           ▀██████████████████▀" "DarkYellow"
-        Write-C "              ▀▀██████████▀▀" "DarkYellow" -NoNewline
+        Write-C "           /  \                 " "DarkYellow"
+        Write-C "          /____\                " "DarkYellow" -NoNewline
         Write-C "             SSH Device Migration" "DarkGray"
-        Write-C "            ▄████████████████████▄" "Red" -NoNewline
+        Write-C "             /\                 " "Red" -NoNewline
         Write-C "       & Adoption" "DarkGray"
-        Write-C "             ▀████████████████▀" "Red"
-        Write-C "                ▀▀████████▀▀" "Red"
+        Write-C "            /  \                " "Red"
+        Write-C "           /____\               " "Red"
         Write-Host ""
     }
 }
 
-function Write-Info  { param([string]$Text) if (-not $Quiet_) { Write-C "  ● " "Cyan" -NoNewline; Write-Host $Text } }
-function Write-Ok    { param([string]$Text) Write-C "  ● " "Green" -NoNewline; Write-Host $Text }
-function Write-Warn  { param([string]$Text) Write-C "  ● " "Yellow" -NoNewline; Write-Host $Text }
-function Write-Fail  { param([string]$Text) Write-C "  ● " "Red" -NoNewline; Write-Host $Text }
-function Write-Opt   { param([string]$Text) if (-not $Quiet_) { Write-C "  ○ " "DarkGray" -NoNewline; Write-Host $Text } }
-function Write-Item  { param([string]$Text) if (-not $Quiet_) { Write-C "  ▸ " "DarkYellow" -NoNewline; Write-Host $Text } }
-function Write-Dbg   { param([string]$Text) if ($Verbose_) { Write-C "    ⌁ " "DarkGray" -NoNewline; Write-C $Text "DarkGray" } }
+function Write-Info  { param([string]$Text) if (-not $Quiet_) { Write-C "  * " "Cyan" -NoNewline; Write-Host $Text } }
+function Write-Ok    { param([string]$Text) Write-C "  * " "Green" -NoNewline; Write-Host $Text }
+function Write-Warn  { param([string]$Text) Write-C "  * " "Yellow" -NoNewline; Write-Host $Text }
+function Write-Fail  { param([string]$Text) Write-C "  * " "Red" -NoNewline; Write-Host $Text }
+function Write-Opt   { param([string]$Text) if (-not $Quiet_) { Write-C "  o " "DarkGray" -NoNewline; Write-Host $Text } }
+function Write-Item  { param([string]$Text) if (-not $Quiet_) { Write-C "  > " "DarkYellow" -NoNewline; Write-Host $Text } }
+function Write-Dbg   { param([string]$Text) if ($Verbose_) { Write-C "    ~ " "DarkGray" -NoNewline; Write-C $Text "DarkGray" } }
 
 # Custom progress bar — gold fill, muted empty (matches bash)
 function Write-ScanProgress {
@@ -257,8 +262,8 @@ function Write-ScanProgress {
     $pct = if ($Total -gt 0) { [Math]::Floor(($Current / $Total) * 100) } else { 0 }
     $filled = [Math]::Floor($pct * $width / 100)
     $empty  = $width - $filled
-    $barFill  = ([string][char]0x2501) * $filled   # ━
-    $barEmpty = ([string][char]0x254C) * $empty     # ╌
+    $barFill  = "=" * $filled
+    $barEmpty = "-" * $empty
     if ($script:TrueColor) {
         $g = Get-Ansi 'GLD'; $m = Get-Ansi 'MUT'; $d = Get-Ansi 'DIM'; $x = Get-Ansi 'RST'
         [Console]::Write("`r  ${d}${Label}${x}${g}${barFill}${x}${m}${barEmpty}${x}  ${d}$($pct.ToString().PadLeft(3))%  ${Current}/${Total}${x}  ")
@@ -271,14 +276,14 @@ function Write-DepLine {
     param([string]$Name, [string]$Status, [string]$StatusColor, [string]$NameColor = "Cyan")
     $dotCount = 24 - $Name.Length
     if ($dotCount -lt 2) { $dotCount = 2 }
-    $dots = "·" * $dotCount
+    $dots = "." * $dotCount
     Write-C "  " "" -NoNewline
     if ($Status -eq "installed") {
-        Write-C "● " "Green" -NoNewline
+        Write-C "* " "Green" -NoNewline
     } elseif ($Status -eq "missing") {
-        Write-C "● " "Red" -NoNewline
+        Write-C "* " "Red" -NoNewline
     } else {
-        Write-C "○ " "DarkGray" -NoNewline
+        Write-C "o " "DarkGray" -NoNewline
     }
     Write-C $Name $NameColor -NoNewline
     Write-C " $dots " "DarkGray" -NoNewline
@@ -301,7 +306,7 @@ function Write-DeviceLine {
         "FAIL"  { " FAIL " }
         default { " ---  " }
     }
-    Write-C "  ▸ " "DarkYellow" -NoNewline
+    Write-C "  > " "DarkYellow" -NoNewline
     Write-C $colIp "White" -NoNewline
     Write-C $colModel "DarkGray" -NoNewline
     Write-C $statusText $statusColor -NoNewline
@@ -996,22 +1001,22 @@ Write-Rule "Results"
 $totalProcessed = $countOk + $countCheck + $countFail
 $cardWidth = 36
 
-Write-C "  ┌$("─" * $cardWidth)┐" "DarkYellow"
-Write-C "  │" "DarkYellow" -NoNewline; Write-C "  Scanned          " "DarkGray" -NoNewline; Write-C "$($total)".PadRight($cardWidth - 20) "Cyan" -NoNewline; Write-C "│" "DarkYellow"
-Write-C "  │" "DarkYellow" -NoNewline; Write-C "  SSH accessible   " "DarkGray" -NoNewline; Write-C "$($totalProcessed)".PadRight($cardWidth - 20) "White" -NoNewline; Write-C "│" "DarkYellow"
-Write-C "  │" "DarkYellow" -NoNewline; Write-C "  Successful       " "DarkGray" -NoNewline; Write-C "$($countOk)".PadRight($cardWidth - 20) "Green" -NoNewline; Write-C "│" "DarkYellow"
+Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
+Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Scanned          " "DarkGray" -NoNewline; Write-C "$($total)".PadRight($cardWidth - 20) "Cyan" -NoNewline; Write-C "|" "DarkYellow"
+Write-C "  |" "DarkYellow" -NoNewline; Write-C "  SSH accessible   " "DarkGray" -NoNewline; Write-C "$($totalProcessed)".PadRight($cardWidth - 20) "White" -NoNewline; Write-C "|" "DarkYellow"
+Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Successful       " "DarkGray" -NoNewline; Write-C "$($countOk)".PadRight($cardWidth - 20) "Green" -NoNewline; Write-C "|" "DarkYellow"
 if ($countCheck -gt 0) {
-    Write-C "  │" "DarkYellow" -NoNewline; Write-C "  Needs attention  " "DarkGray" -NoNewline; Write-C "$($countCheck)".PadRight($cardWidth - 20) "Yellow" -NoNewline; Write-C "│" "DarkYellow"
+    Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Needs attention  " "DarkGray" -NoNewline; Write-C "$($countCheck)".PadRight($cardWidth - 20) "Yellow" -NoNewline; Write-C "|" "DarkYellow"
 }
 if ($countFail -gt 0) {
-    Write-C "  │" "DarkYellow" -NoNewline; Write-C "  Failed           " "DarkGray" -NoNewline; Write-C "$($countFail)".PadRight($cardWidth - 20) "Red" -NoNewline; Write-C "│" "DarkYellow"
+    Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Failed           " "DarkGray" -NoNewline; Write-C "$($countFail)".PadRight($cardWidth - 20) "Red" -NoNewline; Write-C "|" "DarkYellow"
 }
-Write-C "  ├$("─" * $cardWidth)┤" "DarkYellow"
-Write-C "  │" "DarkYellow" -NoNewline; Write-C "  Output  " "DarkGray" -NoNewline
+Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
+Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Output  " "DarkGray" -NoNewline
 $csvDisplay = $OutCsv
 if ($csvDisplay.Length -gt ($cardWidth - 11)) { $csvDisplay = "..." + $csvDisplay.Substring($csvDisplay.Length - ($cardWidth - 14)) }
-Write-C $csvDisplay.PadRight($cardWidth - 10) "DarkYellow" -NoNewline; Write-C "│" "DarkYellow"
-Write-C "  └$("─" * $cardWidth)┘" "DarkYellow"
+Write-C $csvDisplay.PadRight($cardWidth - 10) "DarkYellow" -NoNewline; Write-C "|" "DarkYellow"
+Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
 
 # Export CSV with metadata header
 try {
