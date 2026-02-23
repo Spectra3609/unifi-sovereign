@@ -50,7 +50,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Spectra3609/unifi-sove
 **One-off (no file saved):**
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass; iex (irm "https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1")
+Set-ExecutionPolicy -Scope Process Bypass; irm "https://raw.githubusercontent.com/Spectra3609/unifi-sovereign/main/unifi-sovereign.ps1" -OutFile "$env:TEMP\us.ps1"; & "$env:TEMP\us.ps1"
 ```
 
 ### Clone the Repository
