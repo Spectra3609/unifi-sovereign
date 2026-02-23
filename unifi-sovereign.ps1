@@ -962,24 +962,73 @@ for ($idx = 0; $idx -lt $total; $idx++) {
             $results += [pscustomobject]$row; continue
         }
 
-        $si1 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 1
-        $row.Inform1 = $si1.Output
-        if ($si1.Method) { $row.InformMethod = $si1.Method }
+        # -- Pre-check: what controller is this device currently talking to? --
+        $preInfo = Get-DeviceInfo -Stream $stream -SessionId $sess.SessionId -Timeout ($SshTimeout * 2)
+        $currentInform = $preInfo.InformURL
+        $row.CurrentInform = $currentInform
 
-        Start-Sleep -Seconds 5
+        # Extract hostname/IP from both URLs for comparison
+        $targetHost = ""
+        if ($informUrl -match '://([^:/]+)') { $targetHost = $Matches[1].ToLower() }
+        $currentHost = ""
+        if ($currentInform -match '://([^:/]+)') { $currentHost = $Matches[1].ToLower() }
 
-        $si2 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 2
-        $row.Inform2 = $si2.Output
-        if ($si2.Method -and -not $row.InformMethod) { $row.InformMethod = $si2.Method }
+        # Check if device is already pointing to the correct controller
+        $alreadyCorrect = $false
+        if ($currentHost -and $targetHost -and ($currentHost -eq $targetHost)) {
+            $alreadyCorrect = $true
+        }
+        # Also check if current inform matches the Controller param directly
+        if (-not $alreadyCorrect -and $Controller -and $currentHost -eq $Controller.ToLower()) {
+            $alreadyCorrect = $true
+        }
 
-        if ($si1.Success -or $si2.Success) {
+        if ($alreadyCorrect) {
             $row.Status = "OK"; $countOk++
-            $methodNote = if ($row.InformMethod) { "($($row.InformMethod))" } else { "" }
-            Write-DeviceLine $ip $devInfo.Model "OK" "set-inform accepted $methodNote"
+            $row.Note = "already on correct controller"
+            Write-DeviceLine $ip $devInfo.Model "OK" "already on $currentHost -- skipped"
         } else {
-            $row.Status = "CHECK"; $countCheck++
-            $row.Note = ($row.Note + "; verify in controller").Trim('; ')
-            Write-DeviceLine $ip $devInfo.Model "CHECK" "verify in controller"
+            # Device is NOT on the right controller -- set-inform twice
+            if ($currentInform) {
+                Write-Item "${ip}: currently on $currentHost -- needs migration to $targetHost"
+            } else {
+                Write-Item "${ip}: no inform URL detected -- setting to $targetHost"
+            }
+
+            $si1 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 1
+            $row.Inform1 = $si1.Output
+            if ($si1.Method) { $row.InformMethod = $si1.Method }
+
+            Start-Sleep -Seconds 3
+
+            $si2 = Send-SetInform -Stream $stream -InformUrl $informUrl -Attempt 2
+            $row.Inform2 = $si2.Output
+            if ($si2.Method -and -not $row.InformMethod) { $row.InformMethod = $si2.Method }
+
+            # -- Post-verify: re-check what controller the device reports now --
+            Start-Sleep -Seconds 3
+            $postInfo = Get-DeviceInfo -Stream $stream -SessionId $sess.SessionId -Timeout ($SshTimeout * 2)
+            $postInform = $postInfo.InformURL
+            $postHost = ""
+            if ($postInform -match '://([^:/]+)') { $postHost = $Matches[1].ToLower() }
+
+            $verified = $false
+            if ($postHost -eq $targetHost) { $verified = $true }
+            if (-not $verified -and $Controller -and $postHost -eq $Controller.ToLower()) { $verified = $true }
+
+            if ($verified) {
+                $row.Status = "OK"; $countOk++
+                $methodNote = if ($row.InformMethod) { "($($row.InformMethod))" } else { "" }
+                Write-DeviceLine $ip $devInfo.Model "OK" "verified on $postHost $methodNote"
+            } elseif ($si1.Success -or $si2.Success) {
+                $row.Status = "CHECK"; $countCheck++
+                $row.Note = ($row.Note + "; set-inform accepted but verify shows $postHost instead of $targetHost").Trim('; ')
+                Write-DeviceLine $ip $devInfo.Model "CHECK" "set-inform accepted but still on $postHost"
+            } else {
+                $row.Status = "FAIL"; $countFail++
+                $row.Note = ($row.Note + "; set-inform failed, still on $postHost").Trim('; ')
+                Write-DeviceLine $ip $devInfo.Model "FAIL" "set-inform rejected, still on $postHost"
+            }
         }
 
         if ($stream) { $stream.Dispose() }
