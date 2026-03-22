@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.3.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -31,6 +31,10 @@ CONTROLLER=""
 USERNAME="ubnt"
 PASSWORD=""
 RESET_FIRST=0
+RESTORE_NAMES=0
+API_USER=""
+API_PASS=""
+API_PORT=443
 SSH_TIMEOUT=7
 SCAN_TIMEOUT=3
 OUT_CSV=""
@@ -707,6 +711,96 @@ _port_scan() {
 }
 
 # ===================================================================
+# CONTROLLER API — NAME RESTORE
+# ===================================================================
+
+# Authenticate to UniFi controller, return cookie jar path
+_api_login() {
+  local host="$1" port="$2" user="$3" pass="$4"
+  local jar
+  jar=$(mktemp)
+  local login_url="https://${host}:${port}/api/auth/login"
+  # Try UniFi OS (UDM/UNVR) auth first, fall back to classic
+  local http_code
+  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+    -c "$jar" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
+    "$login_url")
+  if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+    echo "$jar"
+    return 0
+  fi
+  # Classic controller auth
+  login_url="https://${host}:${port}/api/login"
+  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+    -c "$jar" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
+    "$login_url")
+  if [ "$http_code" = "200" ]; then
+    echo "$jar"
+    return 0
+  fi
+  rm -f "$jar"
+  return 1
+}
+
+# Poll controller for a device by MAC, return device _id (up to 60s)
+_api_find_device() {
+  local host="$1" port="$2" jar="$3" mac="$4"
+  local mac_lower
+  mac_lower=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
+  local elapsed=0
+  while [ $elapsed -lt 60 ]; do
+    local resp
+    resp=$(curl -sk -b "$jar" "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
+      || curl -sk -b "$jar" "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
+    local dev_id
+    dev_id=$(echo "$resp" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin).get('data', [])
+    for d in data:
+        if d.get('mac','').lower() == '${mac_lower}':
+            print(d.get('_id',''))
+            break
+except: pass
+" 2>/dev/null)
+    if [ -n "$dev_id" ]; then
+      echo "$dev_id"
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
+}
+
+# Rename a device by _id via controller API
+_api_rename_device() {
+  local host="$1" port="$2" jar="$3" dev_id="$4" name="$5"
+  local http_code
+  # Try UniFi OS proxy path first
+  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+    -b "$jar" \
+    -X PUT \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"${name}\"}" \
+    "https://${host}:${port}/proxy/network/api/s/default/rest/device/${dev_id}")
+  [ "$http_code" = "200" ] && return 0
+  # Classic path
+  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+    -b "$jar" \
+    -X PUT \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"${name}\"}" \
+    "https://${host}:${port}/api/s/default/rest/device/${dev_id}")
+  [ "$http_code" = "200" ] && return 0
+  return 1
+}
+
+# ===================================================================
 # CSV OUTPUT
 # ===================================================================
 
@@ -909,6 +1003,7 @@ main() {
     echo -e "  ${C_GLD}▸${RST} ${C_DIM}Controller${RST}   ${C_CYN}${CONTROLLER}${RST}"
   fi
   [ "$RESET_FIRST" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Reset${RST}        ${C_RED}${C_BLD}YES${RST}"
+  [ "$RESTORE_NAMES" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Restore names${RST} ${C_GRN}${C_BLD}YES${RST} ${C_DIM}(via controller API as ${API_USER:-<api-user not set>})${RST}"
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}SSH Timeout${RST}  ${C_TXT}${SSH_TIMEOUT}s${RST}"
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}Output${RST}       ${C_GLD}${OUT_CSV}${RST}"
 
@@ -939,6 +1034,7 @@ main() {
   local total=${#open_hosts[@]}
   local current=0
   local count_ok=0 count_check=0 count_fail=0
+  local _api_jar=""
 
   for ip in "${open_hosts[@]}"; do
     current=$((current + 1))
@@ -1039,6 +1135,33 @@ main() {
         r_status="OK"
         count_ok=$((count_ok + 1))
         _device_line "$ip" "$r_model" "OK" "set-inform accepted (${inf_method})"
+
+        # Restore device name via controller API after adoption
+        if [ "$MODE" = "ADOPT" ] && [ "$RESTORE_NAMES" -eq 1 ] && [ -n "$r_host" ] && [ -n "$r_mac" ] && [ -n "$API_USER" ]; then
+          if [ -z "$_api_jar" ]; then
+            _info "Authenticating to controller API..."
+            _api_jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
+              _warn "Controller API login failed — skipping name restore"
+            }
+          fi
+          if [ -n "$_api_jar" ]; then
+            _info "${ip}: waiting for device to appear in controller (MAC: ${r_mac})..."
+            local dev_id
+            dev_id=$(_api_find_device "$CONTROLLER" "$API_PORT" "$_api_jar" "$r_mac")
+            if [ -n "$dev_id" ]; then
+              if _api_rename_device "$CONTROLLER" "$API_PORT" "$_api_jar" "$dev_id" "$r_host"; then
+                _ok "${ip}: renamed to '${r_host}'"
+                r_note="${r_note}${r_note:+; }name restored: ${r_host}"
+              else
+                _warn "${ip}: rename failed — set manually in controller"
+                r_note="${r_note}${r_note:+; }rename failed"
+              fi
+            else
+              _warn "${ip}: device not found in controller within 60s — rename skipped"
+              r_note="${r_note}${r_note:+; }device not found for rename"
+            fi
+          fi
+        fi
       else
         r_status="CHECK"
         count_check=$((count_check + 1))
@@ -1101,6 +1224,10 @@ _show_help() {
   echo -e "    --username USER      ${C_DIM}SSH username (default: ubnt)${RST}"
   echo -e "    --password PASS      ${C_DIM}SSH password${RST}"
   echo -e "    --reset              ${C_DIM}Factory reset before adoption${RST}"
+  echo -e "    --restore-names      ${C_DIM}Restore device names after adoption via controller API${RST}"
+  echo -e "    --api-user USER      ${C_DIM}Controller admin username (required for --restore-names)${RST}"
+  echo -e "    --api-pass PASS      ${C_DIM}Controller admin password (required for --restore-names)${RST}"
+  echo -e "    --api-port PORT      ${C_DIM}Controller API port (default: 443)${RST}"
   echo -e "    --ssh-timeout SEC    ${C_DIM}SSH timeout (default: 7)${RST}"
   echo -e "    --scan-timeout SEC   ${C_DIM}Port scan timeout (default: 3)${RST}"
   echo -e "    --output FILE        ${C_DIM}CSV output path${RST}"
@@ -1131,8 +1258,12 @@ while [ $# -gt 0 ]; do
     --controller)  CONTROLLER="$2"; shift 2 ;;
     --username)    USERNAME="$2"; shift 2 ;;
     --password)    PASSWORD="$2"; shift 2 ;;
-    --reset)       RESET_FIRST=1; shift ;;
-    --ssh-timeout) SSH_TIMEOUT="$2"; shift 2 ;;
+    --reset)          RESET_FIRST=1; shift ;;
+    --restore-names)  RESTORE_NAMES=1; shift ;;
+    --api-user)       API_USER="$2"; shift 2 ;;
+    --api-pass)       API_PASS="$2"; shift 2 ;;
+    --api-port)       API_PORT="$2"; shift 2 ;;
+    --ssh-timeout)    SSH_TIMEOUT="$2"; shift 2 ;;
     --scan-timeout) SCAN_TIMEOUT="$2"; shift 2 ;;
     --output)      OUT_CSV="$2"; shift 2 ;;
     --dry-run)     DRY_RUN=1; shift ;;
