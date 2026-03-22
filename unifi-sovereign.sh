@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.3.0"
+SCRIPT_VERSION="3.4.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -32,6 +32,7 @@ USERNAME="ubnt"
 PASSWORD=""
 RESET_FIRST=0
 RESTORE_NAMES=0
+SKIP_ADOPTED=0
 API_USER=""
 API_PASS=""
 API_PORT=443
@@ -1003,6 +1004,7 @@ main() {
     echo -e "  ${C_GLD}▸${RST} ${C_DIM}Controller${RST}   ${C_CYN}${CONTROLLER}${RST}"
   fi
   [ "$RESET_FIRST" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Reset${RST}        ${C_RED}${C_BLD}YES${RST}"
+  [ "$SKIP_ADOPTED" -eq 1 ]  && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Skip adopted${RST}  ${C_WRN}${C_BLD}YES${RST} ${C_DIM}(already-connected devices will be ignored)${RST}"
   [ "$RESTORE_NAMES" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Restore names${RST} ${C_GRN}${C_BLD}YES${RST} ${C_DIM}(via controller API as ${API_USER:-<api-user not set>})${RST}"
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}SSH Timeout${RST}  ${C_TXT}${SSH_TIMEOUT}s${RST}"
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}Output${RST}       ${C_GLD}${OUT_CSV}${RST}"
@@ -1033,7 +1035,7 @@ main() {
 
   local total=${#open_hosts[@]}
   local current=0
-  local count_ok=0 count_check=0 count_fail=0
+  local count_ok=0 count_check=0 count_fail=0 count_skip=0
   local _api_jar=""
 
   for ip in "${open_hosts[@]}"; do
@@ -1078,6 +1080,23 @@ main() {
     r_inform=$(_read_info_field "$info_file" "INFORM_URL")
     r_debug=$(_read_info_raw "$info_file" | head -5 | tr '\n' ' ')
     rm -f "$info_file"
+
+    # SKIP-ADOPTED: ignore devices already connected to any controller
+    if [ "$SKIP_ADOPTED" -eq 1 ] && [ "$MODE" != "SANITY" ]; then
+      local adopted=0
+      # Status field contains "Connected" when device has an active controller
+      if echo "$r_adopt" | grep -qi "connected"; then adopted=1; fi
+      # Inform URL set and pointing somewhere also indicates adoption
+      if [ -z "$adopted" ] || [ "$adopted" -eq 0 ]; then
+        if echo "$r_inform" | grep -q "://"; then adopted=1; fi
+      fi
+      if [ "$adopted" -eq 1 ]; then
+        count_skip=$((count_skip + 1))
+        _debug "${ip}: already adopted (${r_adopt:-status unknown}) — skipped"
+        [ "$VERBOSE" -eq 1 ] && _device_line "$ip" "$r_model" "SKIP" "already adopted (${r_adopt:-${r_inform}})"
+        continue
+      fi
+    fi
 
     # SANITY
     if [ "$MODE" = "SANITY" ]; then
@@ -1190,6 +1209,9 @@ main() {
   if [ "$count_fail" -gt 0 ]; then
     echo -e "  ${C_GLD}│${RST}  ${C_DIM}Failed${RST}           ${C_RED}${C_BLD}${count_fail}${RST}              ${C_GLD}│${RST}"
   fi
+  if [ "$count_skip" -gt 0 ]; then
+    echo -e "  ${C_GLD}│${RST}  ${C_DIM}Skipped (adopted)${RST} ${C_MUT}${count_skip}${RST}              ${C_GLD}│${RST}"
+  fi
   echo -e "  ${C_GLD}├──────────────────────────────────┤${RST}"
   echo -e "  ${C_GLD}│${RST}  ${C_DIM}Output${RST}  ${C_GLD}${OUT_CSV}${RST}"
   echo -e "  ${C_GLD}└──────────────────────────────────┘${RST}"
@@ -1224,6 +1246,7 @@ _show_help() {
   echo -e "    --username USER      ${C_DIM}SSH username (default: ubnt)${RST}"
   echo -e "    --password PASS      ${C_DIM}SSH password${RST}"
   echo -e "    --reset              ${C_DIM}Factory reset before adoption${RST}"
+  echo -e "    --skip-adopted       ${C_DIM}Skip devices already connected to any controller${RST}"
   echo -e "    --restore-names      ${C_DIM}Restore device names after adoption via controller API${RST}"
   echo -e "    --api-user USER      ${C_DIM}Controller admin username (required for --restore-names)${RST}"
   echo -e "    --api-pass PASS      ${C_DIM}Controller admin password (required for --restore-names)${RST}"
@@ -1259,6 +1282,7 @@ while [ $# -gt 0 ]; do
     --username)    USERNAME="$2"; shift 2 ;;
     --password)    PASSWORD="$2"; shift 2 ;;
     --reset)          RESET_FIRST=1; shift ;;
+    --skip-adopted)   SKIP_ADOPTED=1; shift ;;
     --restore-names)  RESTORE_NAMES=1; shift ;;
     --api-user)       API_USER="$2"; shift 2 ;;
     --api-pass)       API_PASS="$2"; shift 2 ;;

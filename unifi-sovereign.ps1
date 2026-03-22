@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.3.0 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.4.0 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -30,6 +30,9 @@
 
 .PARAMETER ResetFirst
   Factory reset before adoption (Adopt only).
+
+.PARAMETER SkipAdopted
+  Skip devices already connected to any controller. Only touches unadopted/pending devices.
 
 .PARAMETER RestoreNames
   After adoption, restore each device's original name via the controller API.
@@ -88,6 +91,7 @@ param(
     [string]$Username,
     [string]$Password,
     [switch]$ResetFirst,
+    [switch]$SkipAdopted,
     [switch]$RestoreNames,
     [string]$ApiUser,
     [string]$ApiPass,
@@ -109,7 +113,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.3.0"
+$script:ScriptVersion = "3.4.0"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -912,6 +916,9 @@ if ($informUrl) {
     Write-Item "Inform URL   $informUrl"
 }
 if ($doReset) { Write-C "  > " "DarkYellow" -NoNewline; Write-C "Reset        " "" -NoNewline; Write-C "YES" "Red" }
+if ($SkipAdopted) {
+    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Skip adopted   " "" -NoNewline; Write-C "YES" "Yellow" -NoNewline; Write-C " (already-connected devices will be ignored)" "DarkGray"
+}
 if ($RestoreNames) {
     $apiWho = if ($ApiUser) { $ApiUser } else { "<api-user not set>" }
     Write-C "  > " "DarkYellow" -NoNewline; Write-C "Restore names  " "" -NoNewline; Write-C "YES" "Green" -NoNewline; Write-C " (via controller API as $apiWho)" "DarkGray"
@@ -936,10 +943,10 @@ $openHosts = Invoke-PortScan -Targets $targetList -TimeoutSec $ScanTimeout -MaxP
 Write-Rule "Processing"
 
 $credList = Build-CredList $credSpec
-$results  = @()
-$total    = $openHosts.Count
-$countOk = 0; $countCheck = 0; $countFail = 0
-$_apiJar  = $null
+$results   = @()
+$total     = $openHosts.Count
+$countOk   = 0; $countCheck = 0; $countFail = 0; $countSkip = 0
+$_apiJar   = $null
 
 for ($idx = 0; $idx -lt $total; $idx++) {
     $ip  = $openHosts[$idx]
@@ -1003,6 +1010,22 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         $row.AdoptStatus   = $devInfo.AdoptStatus
         $row.CurrentInform = $devInfo.InformURL
         $row.DebugInfo     = ($devInfo.RawInfo -replace "`n"," | " -replace "`r","").Trim()
+
+        # SKIP-ADOPTED: ignore devices already connected to any controller
+        if ($SkipAdopted -and $modeStr -ne "Sanity") {
+            $isAdopted = $false
+            if ($devInfo.AdoptStatus -match "(?i)connected") { $isAdopted = $true }
+            if (-not $isAdopted -and $devInfo.InformURL -match "://") { $isAdopted = $true }
+            if ($isAdopted) {
+                $countSkip++
+                $statusStr = if ($devInfo.AdoptStatus) { $devInfo.AdoptStatus } else { $devInfo.InformURL }
+                Write-Dbg "${ip}: already adopted ($statusStr) -- skipped"
+                if ($Verbose_) { Write-DeviceLine $ip $devInfo.Model "SKIP" "already adopted ($statusStr)" }
+                if ($stream) { $stream.Dispose() }
+                try { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } catch {}
+                continue
+            }
+        }
 
         # SANITY
         if ($modeStr -eq "Sanity") {
@@ -1175,6 +1198,9 @@ if ($countCheck -gt 0) {
 }
 if ($countFail -gt 0) {
     Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Failed           " "DarkGray" -NoNewline; Write-C "$($countFail)".PadRight($cardWidth - 20) "Red" -NoNewline; Write-C "|" "DarkYellow"
+}
+if ($countSkip -gt 0) {
+    Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Skipped (adopted)" "DarkGray" -NoNewline; Write-C "$($countSkip)".PadRight($cardWidth - 20) "DarkGray" -NoNewline; Write-C "|" "DarkYellow"
 }
 Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
 Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Output  " "DarkGray" -NoNewline
