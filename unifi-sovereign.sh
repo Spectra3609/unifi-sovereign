@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.5.0"
+SCRIPT_VERSION="3.6.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -33,6 +33,7 @@ PASSWORD=""
 RESET_FIRST=0
 RESTORE_NAMES=0
 SKIP_ADOPTED=0
+IN_CSV=""
 API_USER=""
 API_PASS=""
 API_KEY=""
@@ -941,6 +942,7 @@ main() {
       "SANITY   — verify SSH access, collect device info (read-only)" \
       "MIGRATE  — re-point devices to a new controller (no reset)" \
       "ADOPT    — full adoption with optional factory reset" \
+      "RENAME   — apply device names from a CSV via controller API" \
       "EXIT     — quit")
     MODE=$(echo "$MODE" | awk '{print $1}')
     if [ "$MODE" = "EXIT" ]; then
@@ -951,6 +953,12 @@ main() {
     fi
   fi
   MODE=$(echo "$MODE" | tr '[:lower:]' '[:upper:]')
+
+  # RENAME is self-contained — short-circuit before target/SSH setup
+  if [ "$MODE" = "RENAME" ]; then
+    _run_rename
+    exit 0
+  fi
 
   _rule "Configuration"
   _info "Mode: ${C_BLD}${MODE}${RST}"
@@ -1282,6 +1290,101 @@ main() {
 }
 
 # ===================================================================
+# RENAME MODE — Apply names from CSV via controller API
+# ===================================================================
+
+_run_rename() {
+  if [ -z "$IN_CSV" ]; then
+    IN_CSV=$(_input "CSV file path")
+  fi
+  [ ! -f "$IN_CSV" ] && { _fail "File not found: $IN_CSV"; exit 1; }
+
+  if [ -z "$CONTROLLER" ]; then
+    CONTROLLER=$(_input "Controller IP or hostname")
+  fi
+
+  if [ -z "$API_KEY" ] && [ -z "$API_USER" ]; then
+    local auth_choice
+    auth_choice=$(_menu "Controller auth method:" \
+      "API key  (Settings → Control Plane → API Keys)" \
+      "Username / password")
+    if echo "$auth_choice" | grep -qi "API key\|1"; then
+      API_KEY=$(_input "API key")
+    else
+      API_USER=$(_input "Username")
+      API_PASS=$(read -rs -p "    Password: " p; echo "$p"; echo "" >&2)
+    fi
+  fi
+
+  # Init auth
+  local _jar
+  if [ -n "$API_KEY" ]; then
+    _jar="apikey"
+    _info "Auth: API key"
+  else
+    _info "Authenticating to controller..."
+    _jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
+      _fail "Controller API login failed"
+      exit 1
+    }
+  fi
+
+  _rule "Applying names from CSV"
+  _info "Source: $IN_CSV"
+  echo ""
+
+  local count_ok=0 count_skip=0 count_fail=0
+  local lineno=0
+
+  while IFS=',' read -r line; do
+    # Skip comment/header lines
+    echo "$line" | grep -q '^#' && continue
+    echo "$line" | grep -qi '^Timestamp' && continue
+    lineno=$((lineno + 1))
+
+    # Parse CSV fields (Timestamp,IP,MAC,Connected,Username,Model,DevHostname,...)
+    # Field indices (1-based): 1=Timestamp 2=IP 3=MAC 4=Connected 5=Username 6=Model 7=DevHostname
+    local mac hostname
+    mac=$(echo "$line" | awk -F',' '{gsub(/"/, "", $3); print $3}' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    hostname=$(echo "$line" | awk -F',' '{gsub(/"/, "", $7); print $7}' | tr -d '[:space:]')
+
+    # Skip rows with no MAC or no hostname
+    [ -z "$mac" ] || [ -z "$hostname" ] && continue
+    # Validate MAC format
+    echo "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || continue
+
+    # Look up device in controller
+    local dev_id
+    dev_id=$(_api_find_device "$CONTROLLER" "$API_PORT" "$_jar" "$mac")
+
+    if [ -z "$dev_id" ]; then
+      _warn "${mac}: not found in controller — skipped"
+      count_skip=$((count_skip + 1))
+      continue
+    fi
+
+    if _api_rename_device "$CONTROLLER" "$API_PORT" "$_jar" "$dev_id" "$hostname"; then
+      _ok "${mac} → '${hostname}'"
+      count_ok=$((count_ok + 1))
+    else
+      _warn "${mac}: rename failed (API error)"
+      count_fail=$((count_fail + 1))
+    fi
+
+  done < "$IN_CSV"
+
+  _rule "Results"
+  echo -e "  ${C_GLD}┌──────────────────────────────────┐${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Renamed${RST}          ${C_GRN}${C_BLD}${count_ok}${RST}              ${C_GLD}│${RST}"
+  [ "$count_skip" -gt 0 ] && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Not found${RST}        ${C_WRN}${count_skip}${RST}              ${C_GLD}│${RST}"
+  [ "$count_fail" -gt 0 ] && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Failed${RST}           ${C_RED}${C_BLD}${count_fail}${RST}              ${C_GLD}│${RST}"
+  echo -e "  ${C_GLD}└──────────────────────────────────┘${RST}"
+  echo ""
+  _ok "Done."
+  echo ""
+}
+
+# ===================================================================
 # ARGUMENT PARSING
 # ===================================================================
 
@@ -1295,7 +1398,7 @@ _show_help() {
   echo -e "    $(basename "$0") [OPTIONS]"
   echo ""
   echo -e "  ${C_GLD}OPTIONS${RST}"
-  echo -e "    --mode MODE          ${C_DIM}SANITY | MIGRATE | ADOPT${RST}"
+  echo -e "    --mode MODE          ${C_DIM}SANITY | MIGRATE | ADOPT | RENAME${RST}"
   echo -e "    --cidr SUBNET        ${C_DIM}Target subnet (e.g. 192.168.1.0/24)${RST}"
   echo -e "    --ips IP1,IP2,...    ${C_DIM}Comma-separated IP list${RST}"
   echo -e "    --controller IP      ${C_DIM}Target controller IP/hostname${RST}"
@@ -1311,6 +1414,7 @@ _show_help() {
   echo -e "    --ssh-timeout SEC    ${C_DIM}SSH timeout (default: 7)${RST}"
   echo -e "    --scan-timeout SEC   ${C_DIM}Port scan timeout (default: 3)${RST}"
   echo -e "    --output FILE        ${C_DIM}CSV output path${RST}"
+  echo -e "    --input FILE         ${C_DIM}CSV input path (RENAME mode — use existing scan CSV)${RST}"
   echo -e "    --dry-run            ${C_DIM}Plan without executing${RST}"
   echo -e "    --verbose, -v        ${C_DIM}Debug output${RST}"
   echo -e "    --quiet, -q          ${C_DIM}Minimal output${RST}"
@@ -1348,6 +1452,7 @@ while [ $# -gt 0 ]; do
     --ssh-timeout)    SSH_TIMEOUT="$2"; shift 2 ;;
     --scan-timeout) SCAN_TIMEOUT="$2"; shift 2 ;;
     --output)      OUT_CSV="$2"; shift 2 ;;
+    --input)       IN_CSV="$2"; shift 2 ;;
     --dry-run)     DRY_RUN=1; shift ;;
     --verbose|-v)  VERBOSE=1; shift ;;
     --quiet|-q)    QUIET=1; shift ;;

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.5.0 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.6.0 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -61,6 +61,9 @@
 .PARAMETER OutCsv
   CSV output path.
 
+.PARAMETER InCsv
+  CSV input path for Rename mode — reads MAC+hostname pairs from a prior scan CSV.
+
 .PARAMETER DryRun
   Show plan without executing.
 
@@ -86,7 +89,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("Sanity","Migrate","Adopt")]
+    [ValidateSet("Sanity","Migrate","Adopt","Rename")]
     [string]$Mode,
     [string]$Cidr,
     [string]$IPs,
@@ -104,6 +107,7 @@ param(
     [int]$ScanTimeout = 3,
     [int]$Parallel = 128,
     [string]$OutCsv,
+    [string]$InCsv,
     [switch]$DryRun,
     [switch]$Verbose_,
     [switch]$Quiet_,
@@ -117,7 +121,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.5.0"
+$script:ScriptVersion = "3.6.0"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -836,16 +840,89 @@ if (-not $modeStr) {
         "SANITY   -- verify SSH access, collect device info (read-only)",
         "MIGRATE  -- re-point devices to a new controller (no reset)",
         "ADOPT    -- full adoption with optional factory reset",
+        "RENAME   -- apply device names from a CSV via controller API",
         "EXIT     -- quit"
     ) -Default 1
     switch ($mc) {
         1 { $modeStr = "Sanity" }
         2 { $modeStr = "Migrate" }
         3 { $modeStr = "Adopt" }
-        4 { Write-Host ""; Write-Info "Exited."; Write-Host ""; exit 0 }
+        4 { $modeStr = "Rename" }
+        5 { Write-Host ""; Write-Info "Exited."; Write-Host ""; exit 0 }
     }
 }
 $modeStr = $modeStr.Substring(0,1).ToUpper() + $modeStr.Substring(1).ToLower()
+
+# RENAME mode — self-contained, no SSH needed
+if ($modeStr -eq "Rename") {
+    Write-Rule "Apply Names from CSV"
+
+    if (-not $InCsv) { $InCsv = Read-NonEmpty "CSV file path" }
+    if (-not (Test-Path $InCsv)) { Write-Fail "File not found: $InCsv"; exit 1 }
+    if (-not $Controller) { $Controller = Read-NonEmpty "Controller IP or hostname" }
+
+    $renameAuth = $null
+    if ($ApiKey) {
+        Write-Info "Auth: API key"
+        $renameAuth = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -Key $ApiKey -User "" -Pass ""
+    } elseif ($ApiUser) {
+        Write-Info "Authenticating to controller..."
+        $renameAuth = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -User $ApiUser -Pass $ApiPass -Key ""
+    } else {
+        $ac = Read-MenuChoice -Title "Controller auth method:" -Options @(
+            "API key  (Settings > Control Plane > API Keys)",
+            "Username / password"
+        ) -Default 1
+        if ($ac -eq 1) {
+            $ApiKey = Read-NonEmpty "API key"
+            $renameAuth = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -Key $ApiKey -User "" -Pass ""
+        } else {
+            $ApiUser = Read-NonEmpty "Username"
+            $ApiPass = Read-Host "    Password" -AsSecureString | ForEach-Object { [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
+            $renameAuth = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -User $ApiUser -Pass $ApiPass -Key ""
+        }
+    }
+    if (-not $renameAuth) { Write-Fail "Controller API login failed"; exit 1 }
+
+    Write-Info "Source: $InCsv"
+    Write-Host ""
+
+    $countOk = 0; $countSkip = 0; $countFail = 0
+    $csvLines = Get-Content $InCsv | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '^Timestamp' -and $_.Trim() }
+
+    foreach ($line in $csvLines) {
+        $fields = $line -split ',' | ForEach-Object { $_.Trim('"').Trim() }
+        # CSV fields: Timestamp(0) IP(1) MAC(2) Connected(3) Username(4) Model(5) DevHostname(6)
+        if ($fields.Count -lt 7) { continue }
+        $mac      = $fields[2].ToLower()
+        $hostname = $fields[6]
+        if (-not $mac -or -not $hostname) { continue }
+        if ($mac -notmatch '^([0-9a-f]{2}:){5}[0-9a-f]{2}$') { continue }
+
+        $devId = Get-ApiDeviceId -Host_ $Controller -Port $ApiPort -Auth $renameAuth -Mac $mac
+        if (-not $devId) {
+            Write-Warn "${mac}: not found in controller -- skipped"
+            $countSkip++; continue
+        }
+        if (Set-ApiDeviceName -Host_ $Controller -Port $ApiPort -Auth $renameAuth -DeviceId $devId -Name $hostname) {
+            Write-Ok "${mac} -> '$hostname'"
+            $countOk++
+        } else {
+            Write-Warn "${mac}: rename failed (API error)"
+            $countFail++
+        }
+    }
+
+    Write-Rule "Results"
+    $cardWidth = 36
+    Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
+    Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Renamed           " "DarkGray" -NoNewline; Write-C "$countOk".PadRight($cardWidth - 21) "Green" -NoNewline; Write-C "|" "DarkYellow"
+    if ($countSkip -gt 0) { Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Not found         " "DarkGray" -NoNewline; Write-C "$countSkip".PadRight($cardWidth - 21) "Yellow" -NoNewline; Write-C "|" "DarkYellow" }
+    if ($countFail -gt 0) { Write-C "  |" "DarkYellow" -NoNewline; Write-C "  Failed            " "DarkGray" -NoNewline; Write-C "$countFail".PadRight($cardWidth - 21) "Red" -NoNewline; Write-C "|" "DarkYellow" }
+    Write-C "  +$("-" * $cardWidth)+" "DarkYellow"
+    Write-Host ""; Write-Ok "Done."; Write-Host ""
+    exit 0
+}
 
 Write-Rule "Configuration"
 Write-Info "Mode: $($modeStr.ToUpper())"
