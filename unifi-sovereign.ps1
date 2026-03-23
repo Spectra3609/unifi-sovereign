@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.4.0 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.5.0 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -37,11 +37,14 @@
 .PARAMETER RestoreNames
   After adoption, restore each device's original name via the controller API.
 
+.PARAMETER ApiKey
+  UniFi OS API key for controller auth (preferred — generate in UI under Settings > API Keys).
+
 .PARAMETER ApiUser
-  Controller admin username (required for -RestoreNames).
+  Controller admin username (fallback auth if -ApiKey not provided).
 
 .PARAMETER ApiPass
-  Controller admin password (required for -RestoreNames).
+  Controller admin password (fallback auth if -ApiKey not provided).
 
 .PARAMETER ApiPort
   Controller API port (default: 443).
@@ -93,6 +96,7 @@ param(
     [switch]$ResetFirst,
     [switch]$SkipAdopted,
     [switch]$RestoreNames,
+    [string]$ApiKey,
     [string]$ApiUser,
     [string]$ApiPass,
     [int]$ApiPort = 443,
@@ -113,7 +117,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.4.0"
+$script:ScriptVersion = "3.5.0"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -615,11 +619,13 @@ function Test-ControllerEndpoint {
 # CONTROLLER API — NAME RESTORE
 # ===================================================================
 
+# Returns a hashtable: @{ Jar = <CookieContainer or $null>; ApiKey = <string or $null> }
 function Invoke-ApiLogin {
-    param([string]$Host_, [int]$Port, [string]$User, [string]$Pass)
+    param([string]$Host_, [int]$Port, [string]$User, [string]$Pass, [string]$Key)
+    # API key auth — no session needed, return sentinel
+    if ($Key) { return @{ Jar=$null; ApiKey=$Key } }
     $body = @{username=$User; password=$Pass} | ConvertTo-Json
     $jar  = New-Object System.Net.CookieContainer
-    # Try UniFi OS path
     foreach ($path in @("/api/auth/login", "/api/login")) {
         try {
             $handler = New-Object System.Net.Http.HttpClientHandler
@@ -629,30 +635,38 @@ function Invoke-ApiLogin {
             $content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
             $resp    = $client.PostAsync("https://${Host_}:${Port}${path}", $content).Result
             if ($resp.StatusCode.value__ -in @(200, 204)) {
-                return $jar
+                return @{ Jar=$jar; ApiKey=$null }
             }
         } catch {}
     }
     return $null
 }
 
+# Build an HttpClient with the right auth configured
+function New-ApiClient {
+    param([hashtable]$Auth)
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    if ($Auth.Jar) { $handler.CookieContainer = $Auth.Jar }
+    $handler.ServerCertificateCustomValidationCallback = { $true }
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    if ($Auth.ApiKey) {
+        $client.DefaultRequestHeaders.Add("X-API-KEY", $Auth.ApiKey)
+    }
+    return $client
+}
+
 function Get-ApiDeviceId {
-    param([string]$Host_, [int]$Port, [System.Net.CookieContainer]$Jar, [string]$Mac)
+    param([string]$Host_, [int]$Port, [hashtable]$Auth, [string]$Mac)
     $macLow  = $Mac.ToLower()
     $elapsed = 0
     while ($elapsed -lt 60) {
         foreach ($path in @("/proxy/network/api/s/default/stat/device", "/api/s/default/stat/device")) {
             try {
-                $handler = New-Object System.Net.Http.HttpClientHandler
-                $handler.CookieContainer = $Jar
-                $handler.ServerCertificateCustomValidationCallback = { $true }
-                $client  = New-Object System.Net.Http.HttpClient($handler)
-                $raw     = $client.GetStringAsync("https://${Host_}:${Port}${path}").Result
-                $parsed  = $raw | ConvertFrom-Json
+                $client = New-ApiClient -Auth $Auth
+                $raw    = $client.GetStringAsync("https://${Host_}:${Port}${path}").Result
+                $parsed = $raw | ConvertFrom-Json
                 foreach ($d in $parsed.data) {
-                    if ($d.mac -and $d.mac.ToLower() -eq $macLow) {
-                        return $d._id
-                    }
+                    if ($d.mac -and $d.mac.ToLower() -eq $macLow) { return $d._id }
                 }
             } catch {}
         }
@@ -663,14 +677,11 @@ function Get-ApiDeviceId {
 }
 
 function Set-ApiDeviceName {
-    param([string]$Host_, [int]$Port, [System.Net.CookieContainer]$Jar, [string]$DeviceId, [string]$Name)
+    param([string]$Host_, [int]$Port, [hashtable]$Auth, [string]$DeviceId, [string]$Name)
     $body = @{name=$Name} | ConvertTo-Json
     foreach ($path in @("/proxy/network/api/s/default/rest/device", "/api/s/default/rest/device")) {
         try {
-            $handler = New-Object System.Net.Http.HttpClientHandler
-            $handler.CookieContainer = $Jar
-            $handler.ServerCertificateCustomValidationCallback = { $true }
-            $client  = New-Object System.Net.Http.HttpClient($handler)
+            $client  = New-ApiClient -Auth $Auth
             $content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
             $req     = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Put, "https://${Host_}:${Port}${path}/${DeviceId}")
             $req.Content = $content
@@ -920,8 +931,8 @@ if ($SkipAdopted) {
     Write-C "  > " "DarkYellow" -NoNewline; Write-C "Skip adopted   " "" -NoNewline; Write-C "YES" "Yellow" -NoNewline; Write-C " (already-connected devices will be ignored)" "DarkGray"
 }
 if ($RestoreNames) {
-    $apiWho = if ($ApiUser) { $ApiUser } else { "<api-user not set>" }
-    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Restore names  " "" -NoNewline; Write-C "YES" "Green" -NoNewline; Write-C " (via controller API as $apiWho)" "DarkGray"
+    $authDisplay = if ($ApiKey) { "API key" } elseif ($ApiUser) { "user: $ApiUser" } else { "<no auth set>" }
+    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Restore names  " "" -NoNewline; Write-C "YES" "Green" -NoNewline; Write-C " (via controller API — $authDisplay)" "DarkGray"
 }
 Write-Item "SSH Timeout  ${SshTimeout}s"
 Write-Item "Parallel     $Parallel threads"
@@ -1136,17 +1147,22 @@ for ($idx = 0; $idx -lt $total; $idx++) {
                 Write-DeviceLine $ip $devInfo.Model "OK" "verified on $postHost $methodNote"
 
                 # Restore device name via controller API after adoption
-                if ($modeStr -eq "Adopt" -and $RestoreNames -and $row.DevHostname -and $row.MAC -and $ApiUser) {
+                if ($modeStr -eq "Adopt" -and $RestoreNames -and $row.DevHostname -and $row.MAC -and ($ApiKey -or $ApiUser)) {
                     if (-not $_apiJar) {
-                        Write-Info "Authenticating to controller API..."
-                        $_apiJar = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -User $ApiUser -Pass $ApiPass
+                        if ($ApiKey) {
+                            Write-Info "Using API key auth for controller"
+                            $_apiJar = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -Key $ApiKey -User "" -Pass ""
+                        } else {
+                            Write-Info "Authenticating to controller API..."
+                            $_apiJar = Invoke-ApiLogin -Host_ $Controller -Port $ApiPort -User $ApiUser -Pass $ApiPass -Key ""
+                        }
                         if (-not $_apiJar) { Write-Warn "Controller API login failed -- skipping name restore" }
                     }
                     if ($_apiJar) {
                         Write-Info "${ip}: waiting for device in controller (MAC: $($row.MAC))..."
-                        $devId = Get-ApiDeviceId -Host_ $Controller -Port $ApiPort -Jar $_apiJar -Mac $row.MAC
+                        $devId = Get-ApiDeviceId -Host_ $Controller -Port $ApiPort -Auth $_apiJar -Mac $row.MAC
                         if ($devId) {
-                            if (Set-ApiDeviceName -Host_ $Controller -Port $ApiPort -Jar $_apiJar -DeviceId $devId -Name $row.DevHostname) {
+                            if (Set-ApiDeviceName -Host_ $Controller -Port $ApiPort -Auth $_apiJar -DeviceId $devId -Name $row.DevHostname) {
                                 Write-Ok "${ip}: renamed to '$($row.DevHostname)'"
                                 $row.Note += ("; name restored: $($row.DevHostname)").TrimStart('; ')
                             } else {

@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.4.0"
+SCRIPT_VERSION="3.5.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -35,6 +35,7 @@ RESTORE_NAMES=0
 SKIP_ADOPTED=0
 API_USER=""
 API_PASS=""
+API_KEY=""
 API_PORT=443
 SSH_TIMEOUT=7
 SCAN_TIMEOUT=3
@@ -716,8 +717,25 @@ _port_scan() {
 # ===================================================================
 
 # Authenticate to UniFi controller, return cookie jar path
+# Build curl auth args: API key header OR cookie jar
+# Usage: _api_auth_args "$jar_or_empty" "$api_key_or_empty"
+# Outputs curl flags to stdout
+_api_auth_args() {
+  local jar="$1" key="$2"
+  if [ -n "$key" ]; then
+    echo "-H X-API-KEY: ${key}"
+  elif [ -n "$jar" ]; then
+    echo "-b ${jar}"
+  fi
+}
+
 _api_login() {
   local host="$1" port="$2" user="$3" pass="$4"
+  # If using API key auth this is a no-op — return a sentinel value
+  if [ -n "$API_KEY" ]; then
+    echo "apikey"
+    return 0
+  fi
   local jar
   jar=$(mktemp)
   local login_url="https://${host}:${port}/api/auth/login"
@@ -747,6 +765,16 @@ _api_login() {
   return 1
 }
 
+# Build curl auth flags inline
+_api_curl_auth() {
+  local jar="$1"
+  if [ -n "$API_KEY" ]; then
+    echo "-H" "X-API-KEY: ${API_KEY}"
+  elif [ -n "$jar" ] && [ "$jar" != "apikey" ]; then
+    echo "-b" "$jar"
+  fi
+}
+
 # Poll controller for a device by MAC, return device _id (up to 60s)
 _api_find_device() {
   local host="$1" port="$2" jar="$3" mac="$4"
@@ -755,8 +783,17 @@ _api_find_device() {
   local elapsed=0
   while [ $elapsed -lt 60 ]; do
     local resp
-    resp=$(curl -sk -b "$jar" "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
-      || curl -sk -b "$jar" "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
+    if [ -n "$API_KEY" ]; then
+      resp=$(curl -sk -H "X-API-KEY: ${API_KEY}" \
+        "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
+        || curl -sk -H "X-API-KEY: ${API_KEY}" \
+        "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
+    else
+      resp=$(curl -sk -b "$jar" \
+        "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
+        || curl -sk -b "$jar" \
+        "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
+    fi
     local dev_id
     dev_id=$(echo "$resp" | python3 -c "
 import sys, json
@@ -782,9 +819,15 @@ except: pass
 _api_rename_device() {
   local host="$1" port="$2" jar="$3" dev_id="$4" name="$5"
   local http_code
+  local auth_flag auth_val
+  if [ -n "$API_KEY" ]; then
+    auth_flag="-H"; auth_val="X-API-KEY: ${API_KEY}"
+  else
+    auth_flag="-b"; auth_val="$jar"
+  fi
   # Try UniFi OS proxy path first
   http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    -b "$jar" \
+    "$auth_flag" "$auth_val" \
     -X PUT \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${name}\"}" \
@@ -792,7 +835,7 @@ _api_rename_device() {
   [ "$http_code" = "200" ] && return 0
   # Classic path
   http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    -b "$jar" \
+    "$auth_flag" "$auth_val" \
     -X PUT \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${name}\"}" \
@@ -1005,7 +1048,15 @@ main() {
   fi
   [ "$RESET_FIRST" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Reset${RST}        ${C_RED}${C_BLD}YES${RST}"
   [ "$SKIP_ADOPTED" -eq 1 ]  && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Skip adopted${RST}  ${C_WRN}${C_BLD}YES${RST} ${C_DIM}(already-connected devices will be ignored)${RST}"
-  [ "$RESTORE_NAMES" -eq 1 ] && echo -e "  ${C_GLD}▸${RST} ${C_DIM}Restore names${RST} ${C_GRN}${C_BLD}YES${RST} ${C_DIM}(via controller API as ${API_USER:-<api-user not set>})${RST}"
+  if [ "$RESTORE_NAMES" -eq 1 ]; then
+    local _auth_display
+    if [ -n "$API_KEY" ]; then
+      _auth_display="API key"
+    else
+      _auth_display="user: ${API_USER:-<not set>}"
+    fi
+    echo -e "  ${C_GLD}▸${RST} ${C_DIM}Restore names${RST} ${C_GRN}${C_BLD}YES${RST} ${C_DIM}(via controller API — ${_auth_display})${RST}"
+  fi
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}SSH Timeout${RST}  ${C_TXT}${SSH_TIMEOUT}s${RST}"
   echo -e "  ${C_GLD}▸${RST} ${C_DIM}Output${RST}       ${C_GLD}${OUT_CSV}${RST}"
 
@@ -1156,12 +1207,17 @@ main() {
         _device_line "$ip" "$r_model" "OK" "set-inform accepted (${inf_method})"
 
         # Restore device name via controller API after adoption
-        if [ "$MODE" = "ADOPT" ] && [ "$RESTORE_NAMES" -eq 1 ] && [ -n "$r_host" ] && [ -n "$r_mac" ] && [ -n "$API_USER" ]; then
+        if [ "$MODE" = "ADOPT" ] && [ "$RESTORE_NAMES" -eq 1 ] && [ -n "$r_host" ] && [ -n "$r_mac" ] && { [ -n "$API_KEY" ] || [ -n "$API_USER" ]; }; then
           if [ -z "$_api_jar" ]; then
-            _info "Authenticating to controller API..."
-            _api_jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
-              _warn "Controller API login failed — skipping name restore"
-            }
+            if [ -n "$API_KEY" ]; then
+              _api_jar="apikey"
+              _info "Using API key auth for controller"
+            else
+              _info "Authenticating to controller API..."
+              _api_jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
+                _warn "Controller API login failed — skipping name restore"
+              }
+            fi
           fi
           if [ -n "$_api_jar" ]; then
             _info "${ip}: waiting for device to appear in controller (MAC: ${r_mac})..."
@@ -1248,8 +1304,9 @@ _show_help() {
   echo -e "    --reset              ${C_DIM}Factory reset before adoption${RST}"
   echo -e "    --skip-adopted       ${C_DIM}Skip devices already connected to any controller${RST}"
   echo -e "    --restore-names      ${C_DIM}Restore device names after adoption via controller API${RST}"
-  echo -e "    --api-user USER      ${C_DIM}Controller admin username (required for --restore-names)${RST}"
-  echo -e "    --api-pass PASS      ${C_DIM}Controller admin password (required for --restore-names)${RST}"
+  echo -e "    --api-key KEY        ${C_DIM}UniFi OS API key (preferred auth for --restore-names)${RST}"
+  echo -e "    --api-user USER      ${C_DIM}Controller admin username (fallback auth for --restore-names)${RST}"
+  echo -e "    --api-pass PASS      ${C_DIM}Controller admin password (fallback auth for --restore-names)${RST}"
   echo -e "    --api-port PORT      ${C_DIM}Controller API port (default: 443)${RST}"
   echo -e "    --ssh-timeout SEC    ${C_DIM}SSH timeout (default: 7)${RST}"
   echo -e "    --scan-timeout SEC   ${C_DIM}Port scan timeout (default: 3)${RST}"
@@ -1284,6 +1341,7 @@ while [ $# -gt 0 ]; do
     --reset)          RESET_FIRST=1; shift ;;
     --skip-adopted)   SKIP_ADOPTED=1; shift ;;
     --restore-names)  RESTORE_NAMES=1; shift ;;
+    --api-key)        API_KEY="$2"; shift 2 ;;
     --api-user)       API_USER="$2"; shift 2 ;;
     --api-pass)       API_PASS="$2"; shift 2 ;;
     --api-port)       API_PORT="$2"; shift 2 ;;
