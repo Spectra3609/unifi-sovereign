@@ -1,0 +1,17 @@
+# Secrets
+.env
+*.env
+!.env.example
+
+# Generated files
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
