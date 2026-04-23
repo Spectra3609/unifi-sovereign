@@ -433,21 +433,21 @@ function Get-DeviceClass {
     if (-not $Model) { return "Other" }
     $m = $Model.ToUpper().Trim()
 
-    # Access Points — covers UAP legacy and U-gen (U6/U7/UA/UACC-AP) including
+    # Access Points -- covers UAP legacy and U-gen (U6/U7/UA/UACC-AP) including
     # variants: UAP-AC-Pro, UAP-AC-Pro-Gen2, UAP-AC-LR, UAP-LR, UAP-nanoHD,
     # UAP-IW, UAP-IW-HD, UAP-FlexHD, UAP-HD, UAP-Outdoor+, UAP-AC-M, UAP-AC-M-PRO,
     # U6-Lite, U6-LR, U6-Pro, U6-Mesh, U6-Enterprise, U6-IW, U7-Pro, U7-Outdoor,
-    # UACC-AP (access control), UA-G2 (UniFi Access G2 reader — still AP class).
+    # UACC-AP (access control), UA-G2 (UniFi Access G2 reader -- still AP class).
     # Anchored match so we don't catch UDM by accident.
     if ($m -match '^(UAP[-_]|U6[-_]|U7[-_]|UA[-_]|UACC-AP)') { return "AP" }
     # Bare "UAP" / "U6" / "U7" without suffix (rare but seen on older firmware)
     if ($m -match '^(UAP|U6|U7|UA)$') { return "AP" }
 
-    # Switches — USW-*, US-*, USW-Flex, USW-Enterprise, USW-Pro, USW-Aggregation,
+    # Switches -- USW-*, US-*, USW-Flex, USW-Enterprise, USW-Pro, USW-Aggregation,
     # US-8, US-16, US-24, US-48, USW-Lite, USW-Mission-Critical, etc.
     if ($m -match '^(USW[-_]|US[-_])') { return "Switch" }
 
-    # Gateways / consoles — UDM (UDM-Pro, UDM-SE, UDM-Base, UDR), USG (USG-Pro,
+    # Gateways / consoles -- UDM (UDM-Pro, UDM-SE, UDM-Base, UDR), USG (USG-Pro,
     # USG-3P), UXG (UXG-Pro, UXG-Lite), UCG (Cloud Gateway Ultra/Max), UX-*,
     # UCK (Cloud Key Gen1/Gen2).
     if ($m -match '^(UDM|USG|UXG|UCG|UX[-_]|UCK|UDR)') { return "Gateway" }
@@ -1526,7 +1526,7 @@ for ($idx = 0; $idx -lt $total; $idx++) {
             # Replaces the old single 3s check. Some firmware (seen on
             # UAP-AC-Pro-Gen2 at v6.6.77) needs 10-20s before `info` output
             # reflects the new inform URL locally. Polling catches those
-            # without slowing down the fast ones — breaks as soon as the
+            # without slowing down the fast ones -- breaks as soon as the
             # URL flips.
             $pv = Wait-InformVerified -Stream $stream -SessionId $sess.SessionId `
                                        -Timeout ($SshTimeout * 2) `
