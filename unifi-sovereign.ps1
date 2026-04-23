@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.7.2 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.7.3 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -141,7 +141,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.7.2"
+$script:ScriptVersion = "3.7.3"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -1325,24 +1325,48 @@ for ($idx = 0; $idx -lt $total; $idx++) {
     }
 
     try {
-        # SSH connect with retry
+        # SSH connect with retry -- capture actual exception per cred attempt so we
+        # can distinguish auth-failed from KEX-negotiation-failed from timeout.
+        # Posh-SSH (SSH.NET) disables older KEX algorithms that 6.x UniFi firmware
+        # still uses, which surfaces as a generic failure unless we inspect the
+        # exception message.
         $sess = $null; $ok = $false; $used = $null
+        $lastSshErr = ""
         foreach ($c in $credList) {
             try {
                 $sess = New-SSHSession -ComputerName $ip -Credential $c -AcceptKey -ConnectionTimeout $SshTimeout -ErrorAction Stop
                 $used = $c.UserName; $ok = $true; break
-            } catch {}
+            } catch { $lastSshErr = $_.Exception.Message }
             # Retry once
             Start-Sleep -Milliseconds 1000
             try {
                 $sess = New-SSHSession -ComputerName $ip -Credential $c -AcceptKey -ConnectionTimeout $SshTimeout -ErrorAction Stop
                 $used = $c.UserName; $ok = $true; break
-            } catch {}
+            } catch { $lastSshErr = $_.Exception.Message }
         }
 
         if (-not $ok) {
-            $row.Note = "SSH auth failed"
-            Write-DeviceLine $ip "" "FAIL" "SSH auth failed"
+            # Classify the failure so the user can see at a glance whether to
+            # provide different creds, widen algorithm support, or chase a
+            # network-reachability issue.
+            $failCategory = "SSH failed"
+            $failHint     = ""
+            if ($lastSshErr -match "(?i)authentication|permission denied|no more authentication methods") {
+                $failCategory = "SSH auth failed"
+                $failHint     = "creds didn't match (pass -Username/-Password for hardened devices)"
+            } elseif ($lastSshErr -match "(?i)key exchange|kex|no common|cipher|mac algorithm|host key algorithm|compression") {
+                $failCategory = "SSH KEX failed"
+                $failHint     = "device uses older SSH algorithms than Posh-SSH allows (native ssh.exe probably works)"
+            } elseif ($lastSshErr -match "(?i)timed out|timeout|unreachable|refused|actively refused|no route") {
+                $failCategory = "SSH unreachable"
+                $failHint     = "network / SSH port not reachable despite earlier port-scan hit"
+            } elseif ($lastSshErr) {
+                $failHint     = "raw: $lastSshErr"
+            }
+            $row.Note = if ($failHint) { "${failCategory}: $failHint" } else { $failCategory }
+            $row.DebugInfo = $lastSshErr
+            Write-DeviceLine $ip "" "FAIL" $failCategory
+            if ($Verbose_ -and $lastSshErr) { Write-Dbg "${ip}: $lastSshErr" }
             $countFail++
             $results += [pscustomobject]$row; continue
         }
