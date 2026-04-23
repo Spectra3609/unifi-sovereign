@@ -38,7 +38,7 @@
   After adoption, restore each device's original name via the controller API.
 
 .PARAMETER ApiKey
-  UniFi OS API key for controller auth (preferred — generate in UI under Settings > API Keys).
+  UniFi OS API key for controller auth (preferred - generate in UI under Settings > API Keys).
 
 .PARAMETER ApiUser
   Controller admin username (fallback auth if -ApiKey not provided).
@@ -62,7 +62,7 @@
   CSV output path.
 
 .PARAMETER InCsv
-  CSV input path for Rename mode — reads MAC+hostname pairs from a prior scan CSV.
+  CSV input path for Rename mode - reads MAC+hostname pairs from a prior scan CSV.
 
 .PARAMETER DryRun
   Show plan without executing.
@@ -620,13 +620,13 @@ function Test-ControllerEndpoint {
 }
 
 # ===================================================================
-# CONTROLLER API — NAME RESTORE
+# CONTROLLER API - NAME RESTORE
 # ===================================================================
 
 # Returns a hashtable: @{ Jar = <CookieContainer or $null>; ApiKey = <string or $null> }
 function Invoke-ApiLogin {
     param([string]$Host_, [int]$Port, [string]$User, [string]$Pass, [string]$Key)
-    # API key auth — no session needed, return sentinel
+    # API key auth - no session needed, return sentinel
     if ($Key) { return @{ Jar=$null; ApiKey=$Key } }
     $body = @{username=$User; password=$Pass} | ConvertTo-Json
     $jar  = New-Object System.Net.CookieContainer
@@ -853,7 +853,7 @@ if (-not $modeStr) {
 }
 $modeStr = $modeStr.Substring(0,1).ToUpper() + $modeStr.Substring(1).ToLower()
 
-# RENAME mode — self-contained, no SSH needed
+# RENAME mode - self-contained, no SSH needed
 if ($modeStr -eq "Rename") {
     Write-Rule "Apply Names from CSV"
 
@@ -1009,7 +1009,7 @@ if ($SkipAdopted) {
 }
 if ($RestoreNames) {
     $authDisplay = if ($ApiKey) { "API key" } elseif ($ApiUser) { "user: $ApiUser" } else { "<no auth set>" }
-    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Restore names  " "" -NoNewline; Write-C "YES" "Green" -NoNewline; Write-C " (via controller API — $authDisplay)" "DarkGray"
+    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Restore names  " "" -NoNewline; Write-C "YES" "Green" -NoNewline; Write-C " (via controller API - $authDisplay)" "DarkGray"
 }
 Write-Item "SSH Timeout  ${SshTimeout}s"
 Write-Item "Parallel     $Parallel threads"

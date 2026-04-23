@@ -1,0 +1,41 @@
+name: ASCII check (PS 5.1 compatibility)
+
+# Windows PowerShell 5.1 mangles UTF-8 multi-byte chars when the script is
+# downloaded via Invoke-WebRequest (default ANSI/Windows-1252 save). This
+# job fails the build if any .ps1 file contains non-ASCII bytes, which
+# protects the README's one-liner workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.ps1'
+      - '.github/workflows/ascii-check.yml'
+  pull_request:
+    paths:
+      - '**/*.ps1'
+
+jobs:
+  non-ascii-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan .ps1 files for non-ASCII bytes
+        run: |
+          set -euo pipefail
+          offenders=$(grep -RlP '[^\x00-\x7F]' --include='*.ps1' . || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::Non-ASCII characters found in .ps1 files."
+            echo ""
+            echo "PS 5.1 mangles UTF-8 em-dashes / smart-quotes / arrows / box-drawing"
+            echo "when the script is downloaded with Invoke-WebRequest. The README's"
+            echo "one-liner breaks on any non-ASCII byte."
+            echo ""
+            echo "Offending lines:"
+            grep -RnP '[^\x00-\x7F]' --include='*.ps1' .
+            echo ""
+            echo "Fix: replace em-dashes (-) with hyphens, smart-quotes with straight"
+            echo "quotes, arrows with -> / <-, etc. Keep .ps1 strictly ASCII."
+            exit 1
+          fi
+          echo "All .ps1 files are ASCII-clean."
