@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.6.0 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.7.0 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -62,7 +62,21 @@
   CSV output path.
 
 .PARAMETER InCsv
-  CSV input path for Rename mode - reads MAC+hostname pairs from a prior scan CSV.
+  CSV input path.
+    Rename mode: reads MAC+hostname pairs from a prior scan CSV.
+    Sanity/Migrate/Adopt: reads IP column as the target list. If the CSV
+      also has a MAC column, the MAC is validated after SSH contact and
+      mismatches are flagged in the Note field (device-on-wrong-IP check).
+
+.PARAMETER Class
+  Device class filter for Migrate/Adopt. One of: All, AP, Switch, Gateway, Other.
+  Model prefix classifier: UAP*/U7*/U6*/UA* = AP; USW*/US-* = Switch;
+  UDM*/USG*/UXG* = Gateway; anything else = Other.
+  Omit the flag to get an interactive post-discovery selection menu (recommended).
+
+.PARAMETER StrictMacMatch
+  When -InCsv is used with MAC data, refuse to act on devices whose MAC
+  does not match the CSV entry. Default: warn and proceed.
 
 .PARAMETER DryRun
   Show plan without executing.
@@ -83,7 +97,10 @@
   .\unifi-sovereign.ps1 -Mode Sanity -Cidr 10.0.1.0/24 -DryRun
 
 .NOTES
-  v3.3.0 -- RestoreNames flag: restore device alias post-adoption via controller API.
+  v3.7.0 -- CSV target ingest + class filter for Migrate/Adopt.
+    -InCsv  : works in Sanity/Migrate/Adopt now (reads IP column for targets,
+              validates MAC on SSH contact if MAC column present).
+    -Class  : AP/Switch/Gateway/Other/All. Omit for interactive post-scan menu.
   If execution policy blocks: Set-ExecutionPolicy -Scope Process Bypass
 #>
 
@@ -108,6 +125,9 @@ param(
     [int]$Parallel = 128,
     [string]$OutCsv,
     [string]$InCsv,
+    [ValidateSet("All","AP","Switch","Gateway","Other")]
+    [string]$Class,
+    [switch]$StrictMacMatch,
     [switch]$DryRun,
     [switch]$Verbose_,
     [switch]$Quiet_,
@@ -121,7 +141,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.6.0"
+$script:ScriptVersion = "3.7.0"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -403,6 +423,52 @@ function Read-WithDefault {
 function ConvertTo-SafeSecureString {
     param([string]$Plain)
     return (ConvertTo-SecureString $Plain -AsPlainText -Force)
+}
+
+function Get-DeviceClass {
+    # Map a UniFi device Model string to a coarse class for filtering.
+    # Prefix-based: handles known U-series naming conventions.
+    # Returns one of: AP, Switch, Gateway, Other.
+    param([string]$Model)
+    if (-not $Model) { return "Other" }
+    $m = $Model.ToUpper()
+    # Access Points: UAP-*, U6-*, U7-*, UA-*, UACC-* (including U6-Lite, U7-Pro, etc.)
+    if ($m -match '^(UAP|U6|U7|UA|UACC-AP)') { return "AP" }
+    # Switches: USW-*, US-* (24-port, flex, etc.)
+    if ($m -match '^(USW|US-)') { return "Switch" }
+    # Gateways / consoles: UDM, USG, UXG, UCG, UX
+    if ($m -match '^(UDM|USG|UXG|UCG|UX-|UCK)') { return "Gateway" }
+    return "Other"
+}
+
+function Read-IpsFromCsv {
+    # Parse a prior scan CSV. Returns a hashtable:
+    #   { IPs = @(ordered, unique list of valid IPs)
+    #     MacMap = @{ ip -> expected_mac (lowercased) } }
+    # Skips '#' comment lines and the 'Timestamp' header row.
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        throw "CSV not found: $Path"
+    }
+    $lines = Get-Content $Path | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '^Timestamp' -and $_.Trim() }
+    $ips = @()
+    $map = @{}
+    foreach ($line in $lines) {
+        $fields = $line -split ',' | ForEach-Object { $_.Trim('"').Trim() }
+        # scan CSV schema: Timestamp(0) IP(1) MAC(2) Connected(3) Username(4) Model(5) DevHostname(6) ...
+        if ($fields.Count -lt 2) { continue }
+        $ip = $fields[1]
+        if ($ip -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+        if ($ips -contains $ip) { continue }
+        $ips += $ip
+        if ($fields.Count -ge 3) {
+            $mac = $fields[2].ToLower()
+            if ($mac -match '^([0-9a-f]{2}:){5}[0-9a-f]{2}$') {
+                $map[$ip] = $mac
+            }
+        }
+    }
+    return @{ IPs = $ips; MacMap = $map }
 }
 
 function Get-DefaultCsvPath {
@@ -928,8 +994,30 @@ Write-Rule "Configuration"
 Write-Info "Mode: $($modeStr.ToUpper())"
 
 # -- Targets --
+# Conflict guard: InCsv is exclusive with Cidr/IPs
+$targetFlagsSet = @()
+if ($Cidr)  { $targetFlagsSet += "-Cidr" }
+if ($IPs)   { $targetFlagsSet += "-IPs" }
+if ($InCsv) { $targetFlagsSet += "-InCsv" }
+if ($targetFlagsSet.Count -gt 1) {
+    Write-Fail "Target sources are exclusive. Pick one: $($targetFlagsSet -join ', ')"
+    exit 1
+}
+
 $targetList = @()
-if ($Cidr) {
+$csvMacMap  = @{}  # IP -> expected MAC from CSV (empty if no CSV or CSV lacks MACs)
+
+if ($InCsv) {
+    try {
+        $csvParsed  = Read-IpsFromCsv $InCsv
+        $targetList = $csvParsed.IPs
+        $csvMacMap  = $csvParsed.MacMap
+        Write-Info "Target source: CSV ($InCsv)"
+        if ($csvMacMap.Count -gt 0) {
+            Write-Info "MAC validation enabled for $($csvMacMap.Count) entries"
+        }
+    } catch { Write-Fail $_.Exception.Message; exit 1 }
+} elseif ($Cidr) {
     try { $targetList = Get-IPsFromCidr $Cidr } catch { Write-Fail $_.Exception.Message; exit 1 }
 } elseif ($IPs) {
     $targetList = ($IPs -split '[,\s]+' | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) | Select-Object -Unique
@@ -937,10 +1025,23 @@ if ($Cidr) {
     $tc = Read-MenuChoice -Title "Target input:" -Options @(
         "CIDR subnet  (e.g. 192.168.1.0/24)",
         "IP list      (comma-separated)",
+        "CSV file     (from prior scan)",
         "EXIT"
     ) -Default 1
-    if ($tc -eq 3) { Write-Host ""; Write-Info "Exited."; Write-Host ""; exit 0 }
-    if ($tc -eq 2) {
+    if ($tc -eq 4) { Write-Host ""; Write-Info "Exited."; Write-Host ""; exit 0 }
+    if ($tc -eq 3) {
+        $raw = Read-NonEmpty "CSV path"
+        try {
+            $csvParsed  = Read-IpsFromCsv $raw
+            $targetList = $csvParsed.IPs
+            $csvMacMap  = $csvParsed.MacMap
+            $InCsv      = $raw
+            Write-Info "Loaded $($targetList.Count) IPs from $raw"
+            if ($csvMacMap.Count -gt 0) {
+                Write-Info "MAC validation enabled for $($csvMacMap.Count) entries"
+            }
+        } catch { Write-Fail $_.Exception.Message; exit 1 }
+    } elseif ($tc -eq 2) {
         $raw = Read-NonEmpty "IPs (comma-separated)"
         $targetList = ($raw -split '[,\s]+' | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) | Select-Object -Unique
     } else {
@@ -999,6 +1100,16 @@ if (-not $OutCsv) {
 Write-Rule "Plan"
 Write-Item "Mode         $($modeStr.ToUpper())"
 Write-Item "Targets      $($targetList.Count) IPs"
+if ($InCsv) {
+    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Target source  " "" -NoNewline; Write-C "CSV" "Cyan" -NoNewline; Write-C " ($InCsv)" "DarkGray"
+    if ($csvMacMap.Count -gt 0) {
+        $macPolicy = if ($StrictMacMatch) { "STRICT (skip on mismatch)" } else { "warn on mismatch" }
+        Write-C "  > " "DarkYellow" -NoNewline; Write-C "MAC validation " "" -NoNewline; Write-C "$($csvMacMap.Count) entries" "Green" -NoNewline; Write-C " ($macPolicy)" "DarkGray"
+    }
+}
+if ($Class) {
+    Write-C "  > " "DarkYellow" -NoNewline; Write-C "Class filter   " "" -NoNewline; Write-C "$Class" "Cyan" -NoNewline; Write-C " (flag-set, non-matching devices skipped)" "DarkGray"
+}
 if ($informUrl) {
     Write-Item "Controller   $Controller"
     Write-Item "Inform URL   $informUrl"
@@ -1027,10 +1138,99 @@ if ((Read-YesNo "Execute?" 'Y') -ne 'Y') { Write-Host ""; Write-Info "Aborted.";
 # -- Scan --
 $openHosts = Invoke-PortScan -Targets $targetList -TimeoutSec $ScanTimeout -MaxParallel $Parallel
 
+# -- Credentials --
+$credList = Build-CredList $credSpec
+
+# -- Class filter: resolve + optional pre-scan for interactive menu --
+# For Migrate/Adopt, when no -Class flag is provided and not in -Quiet_ mode,
+# do a lightweight discovery pre-scan to show device counts by class and let
+# the operator pick which class to act on. This is the "APs first, switches
+# later" staged-rollout workflow.
+$classFilter = $Class
+if (-not $classFilter) { $classFilter = "All" }
+
+$preScanModels = @{}   # IP -> Model from pre-scan (reused later to avoid double-SSH cost)
+$preScanMacs   = @{}   # IP -> MAC from pre-scan
+
+if ($modeStr -in @("Migrate","Adopt") -and (-not $Class) -and (-not $Quiet_) -and $openHosts.Count -gt 0) {
+    Write-Rule "Pre-scan"
+    Write-Info "Discovering device classes across $($openHosts.Count) hosts..."
+    Write-Host ""
+
+    $psIdx = 0
+    foreach ($ip in $openHosts) {
+        $psIdx++
+        Write-ScanProgress $psIdx $openHosts.Count $ip
+        $psSess = $null
+        foreach ($c in $credList) {
+            try {
+                $psSess = New-SSHSession -ComputerName $ip -Credential $c -AcceptKey -ConnectionTimeout $SshTimeout -ErrorAction Stop
+                break
+            } catch {}
+        }
+        if (-not $psSess) { continue }
+        $psStream = $null
+        try { $psStream = New-ShellStream -SessionId $psSess.SessionId } catch {}
+        if ($psStream) {
+            try {
+                $psInfo = Get-DeviceInfo -Stream $psStream -SessionId $psSess.SessionId -Timeout ($SshTimeout * 2)
+                if ($psInfo.Model) { $preScanModels[$ip] = $psInfo.Model }
+                if ($psInfo.MAC)   { $preScanMacs[$ip]   = $psInfo.MAC.ToLower() }
+            } catch {}
+            try { $psStream.Dispose() } catch {}
+        }
+        try { Remove-SSHSession -SessionId $psSess.SessionId | Out-Null } catch {}
+    }
+    Write-Host ""
+
+    # Tally by class
+    $classCounts = @{ All = 0; AP = 0; Switch = 0; Gateway = 0; Other = 0 }
+    foreach ($ip in $preScanModels.Keys) {
+        $cls = Get-DeviceClass $preScanModels[$ip]
+        $classCounts[$cls]++
+        $classCounts.All++
+    }
+    $unreachable = $openHosts.Count - $classCounts.All
+
+    Write-Rule "Discovered"
+    Write-Item "APs              $($classCounts.AP)"
+    Write-Item "Switches         $($classCounts.Switch)"
+    Write-Item "Gateways         $($classCounts.Gateway)"
+    Write-Item "Other            $($classCounts.Other)"
+    if ($unreachable -gt 0) {
+        Write-Item "Unreachable      $unreachable (no SSH / no info)"
+    }
+    Write-Host ""
+
+    # Prompt unless only one class was found
+    if ($classCounts.All -eq 0) {
+        Write-Fail "No devices responded to SSH info probes. Nothing to act on."
+        exit 1
+    }
+
+    # Build menu dynamically - only show classes that have > 0 devices
+    $menuOptions = @()
+    $menuClasses = @()
+    $menuOptions += "All devices ($($classCounts.All))"
+    $menuClasses += "All"
+    foreach ($cls in @("AP","Switch","Gateway","Other")) {
+        if ($classCounts[$cls] -gt 0) {
+            $menuOptions += "$cls" + "s only ($($classCounts[$cls]))"
+            $menuClasses += $cls
+        }
+    }
+    $menuOptions += "EXIT"
+
+    $cc = Read-MenuChoice -Title "Target class:" -Options $menuOptions -Default 1
+    if ($cc -eq $menuOptions.Count) { Write-Host ""; Write-Info "Exited."; Write-Host ""; exit 0 }
+    $classFilter = $menuClasses[$cc - 1]
+    Write-Info "Class filter: $classFilter"
+    Write-Host ""
+}
+
 # -- Process --
 Write-Rule "Processing"
 
-$credList = Build-CredList $credSpec
 $results   = @()
 $total     = $openHosts.Count
 $countOk   = 0; $countCheck = 0; $countFail = 0; $countSkip = 0
@@ -1098,6 +1298,45 @@ for ($idx = 0; $idx -lt $total; $idx++) {
         $row.AdoptStatus   = $devInfo.AdoptStatus
         $row.CurrentInform = $devInfo.InformURL
         $row.DebugInfo     = ($devInfo.RawInfo -replace "`n"," | " -replace "`r","").Trim()
+
+        # CLASS FILTER: if the operator picked a specific class, skip others.
+        # Sanity mode always acts on everything (discovery report).
+        if ($modeStr -ne "Sanity" -and $classFilter -and $classFilter -ne "All") {
+            $deviceClass = Get-DeviceClass $devInfo.Model
+            if ($deviceClass -ne $classFilter) {
+                $countSkip++
+                Write-Dbg "${ip}: class $deviceClass, filter $classFilter -- skipped"
+                if ($Verbose_) { Write-DeviceLine $ip $devInfo.Model "SKIP" "class $deviceClass (filter: $classFilter)" }
+                if ($stream) { $stream.Dispose() }
+                try { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } catch {}
+                $row.Status = "SKIP"; $row.Note = "class $deviceClass (filter: $classFilter)"
+                $results += [pscustomobject]$row; continue
+            }
+        }
+
+        # MAC VALIDATION: if a CSV target with MAC was supplied, verify identity.
+        # Default: warn-and-proceed; with -StrictMacMatch, skip mismatched devices.
+        if ($csvMacMap.Count -gt 0 -and $csvMacMap.ContainsKey($ip) -and $devInfo.MAC) {
+            $expectedMac = $csvMacMap[$ip]
+            $actualMac   = $devInfo.MAC.ToLower()
+            if ($expectedMac -ne $actualMac) {
+                $msg = "MAC mismatch at ${ip}: CSV=$expectedMac actual=$actualMac"
+                if ($StrictMacMatch) {
+                    Write-Warn "$msg -- skipping (-StrictMacMatch)"
+                    $countSkip++
+                    $row.Status = "SKIP"
+                    $row.Note   = "MAC mismatch (strict): CSV=$expectedMac actual=$actualMac"
+                    if ($stream) { $stream.Dispose() }
+                    try { Remove-SSHSession -SessionId $sess.SessionId | Out-Null } catch {}
+                    $results += [pscustomobject]$row; continue
+                } else {
+                    Write-Warn "$msg -- proceeding (use -StrictMacMatch to block)"
+                    $row.Note = ($row.Note + "; MAC mismatch: CSV=$expectedMac actual=$actualMac").Trim('; ')
+                }
+            } else {
+                Write-Dbg "${ip}: MAC validated ($actualMac)"
+            }
+        }
 
         # SKIP-ADOPTED: ignore devices already connected to any controller
         if ($SkipAdopted -and $modeStr -ne "Sanity") {

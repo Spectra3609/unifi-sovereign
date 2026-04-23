@@ -94,6 +94,26 @@ Both versions detect missing dependencies and offer to install them automaticall
 .\unifi-sovereign.ps1 -Mode Adopt -Cidr 10.0.1.0/24 -Controller 10.0.0.5 -ResetFirst
 ```
 
+### Staged Adoption by Device Class (v3.7.0+)
+
+Run Sanity first to produce a CSV of what's out there, then adopt APs first, then switches. The CSV becomes both the target list and the identity-validation source.
+
+**Windows:**
+```powershell
+# 1. Discover everything, save CSV
+.\unifi-sovereign.ps1 -Mode Sanity -Cidr 192.168.1.0/24 -OutCsv scan.csv
+
+# 2. Adopt only the APs from the scan (uses IP + MAC validation)
+.\unifi-sovereign.ps1 -Mode Adopt -InCsv scan.csv -Controller 10.0.0.5 -Class AP
+
+# 3. Switches next
+.\unifi-sovereign.ps1 -Mode Adopt -InCsv scan.csv -Controller 10.0.0.5 -Class Switch
+```
+
+**Without `-Class`:** the script runs a pre-scan across the target IPs and shows a count-by-class menu ("APs only / Switches only / All / EXIT") so you can pick after seeing what's there.
+
+**With `-StrictMacMatch`:** MAC mismatches between the CSV and the device at that IP block the action (default: warn and proceed). Use when you need to guarantee you're touching the same physical device even if DHCP leases have shifted.
+
 ### Dry Run
 
 ```bash
@@ -126,6 +146,14 @@ Shows the full execution plan without making any changes.
 | `--verbose` / `-v` | Debug output | Off |
 | `--quiet` / `-q` | Minimal output | Off |
 | `--no-color` | Disable ANSI colors | Off |
+
+### PowerShell-only flags (v3.7.0+)
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `-InCsv` | CSV target source (reads IP column; MAC column used for validation if present). Works in Sanity/Migrate/Adopt (and the pre-existing Rename mode). Exclusive with `-Cidr` / `-IPs`. | — |
+| `-Class` | Device class filter for Migrate/Adopt: `All`, `AP`, `Switch`, `Gateway`, `Other`. Omit the flag to get an interactive post-discovery menu. | Interactive |
+| `-StrictMacMatch` | When `-InCsv` MAC column is present, skip devices whose actual MAC disagrees with the CSV entry. Default is warn-and-proceed. | Off |
 
 ---
 
@@ -250,7 +278,17 @@ CSV with the following columns:
 
 ## Version History
 
-### v3.0.0 (Current)
+### v3.7.0 (Current)
+
+**PowerShell — staged adoption workflow.**
+
+- **`-InCsv` extended** to Sanity / Migrate / Adopt modes. Reads the IP column from a prior scan CSV as the target list. If the CSV has a MAC column, the MAC is validated after SSH contact and mismatches are flagged in the `Note` field. Exclusive with `-Cidr` / `-IPs` (fails loudly on conflict).
+- **`-Class` filter** for Migrate / Adopt — `AP` / `Switch` / `Gateway` / `Other` / `All`. Classifier maps Model prefixes: `UAP*/U7*/U6*/UA*` → AP; `USW*/US-*` → Switch; `UDM*/USG*/UXG*/UCG*/UX-*/UCK*` → Gateway. Non-matching devices are skipped with a `SKIP` status.
+- **Interactive class selection** when `-Class` is not passed (and not `-Quiet_`). A lightweight pre-scan runs across the discovered SSH-reachable hosts, shows a count-by-class summary, and prompts the operator: *"APs only (7) / Switches only (3) / Gateways only (1) / All / EXIT"*. Staged rollout UX.
+- **`-StrictMacMatch`** opt-in flag to block action on MAC mismatch instead of warning.
+- **New interactive target menu option** — "CSV file (from prior scan)" joins CIDR and IP-list as a target source.
+
+### v3.0.0
 
 Major rewrite of the Bash/Zsh version.
 
