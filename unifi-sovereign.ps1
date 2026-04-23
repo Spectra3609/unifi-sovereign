@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.7.0 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.7.1 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -141,7 +141,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.7.0"
+$script:ScriptVersion = "3.7.1"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -579,6 +579,13 @@ function Get-DeviceInfo {
         if ($text -match "Hostname:\s*(.+)")                     { $info.Hostname     = $Matches[1].Trim() }
         if ($text -match "Status:\s*(.+)")                       { $info.AdoptStatus  = $Matches[1].Trim() }
         if ($text -match "Inform\s*URL:\s*(.+)")                 { $info.InformURL    = $Matches[1].Trim() }
+        # Fallback: 6.x firmware embeds the inform URL inside the Status line's parens
+        #   (e.g. "Status: Connected (http://192.168.0.3:8080/inform)") and does not emit
+        # a separate "Inform URL:" line. Without this, post-verify reads empty and flags
+        # correctly-adopted devices as CHECK.
+        if (-not $info.InformURL -and $info.AdoptStatus -match '\((https?://[^)]+)\)') {
+            $info.InformURL = $Matches[1].Trim()
+        }
         if ($text -match "MAC\s*Address:\s*([0-9A-Fa-f:]{17})")  { $info.MAC = $Matches[1].ToLower() }
         elseif ($text -match "MAC:\s*([0-9A-Fa-f:]{17})")        { $info.MAC = $Matches[1].ToLower() }
     }
