@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  UniFi Sovereign v3.7.1 -- SSH-based device migration & adoption toolkit (Windows)
+  UniFi Sovereign v3.7.2 -- SSH-based device migration & adoption toolkit (Windows)
 
 .DESCRIPTION
   Scans a subnet or IP list for UniFi devices via SSH, then performs:
@@ -141,7 +141,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 }
 
 $ErrorActionPreference = "Continue"
-$script:ScriptVersion = "3.7.1"
+$script:ScriptVersion = "3.7.2"
 $script:UseColor = -not $NoColor
 
 # ===================================================================
@@ -431,14 +431,83 @@ function Get-DeviceClass {
     # Returns one of: AP, Switch, Gateway, Other.
     param([string]$Model)
     if (-not $Model) { return "Other" }
-    $m = $Model.ToUpper()
-    # Access Points: UAP-*, U6-*, U7-*, UA-*, UACC-* (including U6-Lite, U7-Pro, etc.)
-    if ($m -match '^(UAP|U6|U7|UA|UACC-AP)') { return "AP" }
-    # Switches: USW-*, US-* (24-port, flex, etc.)
-    if ($m -match '^(USW|US-)') { return "Switch" }
-    # Gateways / consoles: UDM, USG, UXG, UCG, UX
-    if ($m -match '^(UDM|USG|UXG|UCG|UX-|UCK)') { return "Gateway" }
+    $m = $Model.ToUpper().Trim()
+
+    # Access Points — covers UAP legacy and U-gen (U6/U7/UA/UACC-AP) including
+    # variants: UAP-AC-Pro, UAP-AC-Pro-Gen2, UAP-AC-LR, UAP-LR, UAP-nanoHD,
+    # UAP-IW, UAP-IW-HD, UAP-FlexHD, UAP-HD, UAP-Outdoor+, UAP-AC-M, UAP-AC-M-PRO,
+    # U6-Lite, U6-LR, U6-Pro, U6-Mesh, U6-Enterprise, U6-IW, U7-Pro, U7-Outdoor,
+    # UACC-AP (access control), UA-G2 (UniFi Access G2 reader — still AP class).
+    # Anchored match so we don't catch UDM by accident.
+    if ($m -match '^(UAP[-_]|U6[-_]|U7[-_]|UA[-_]|UACC-AP)') { return "AP" }
+    # Bare "UAP" / "U6" / "U7" without suffix (rare but seen on older firmware)
+    if ($m -match '^(UAP|U6|U7|UA)$') { return "AP" }
+
+    # Switches — USW-*, US-*, USW-Flex, USW-Enterprise, USW-Pro, USW-Aggregation,
+    # US-8, US-16, US-24, US-48, USW-Lite, USW-Mission-Critical, etc.
+    if ($m -match '^(USW[-_]|US[-_])') { return "Switch" }
+
+    # Gateways / consoles — UDM (UDM-Pro, UDM-SE, UDM-Base, UDR), USG (USG-Pro,
+    # USG-3P), UXG (UXG-Pro, UXG-Lite), UCG (Cloud Gateway Ultra/Max), UX-*,
+    # UCK (Cloud Key Gen1/Gen2).
+    if ($m -match '^(UDM|USG|UXG|UCG|UX[-_]|UCK|UDR)') { return "Gateway" }
+
     return "Other"
+}
+
+function Wait-InformVerified {
+    # Poll the device's info output with backoff until its reported inform URL
+    # matches the target host, or the timeout budget runs out.
+    #
+    # Returns: @{ Verified=$true|$false; PostInform=""; PostHost=""; Attempts=n }
+    #
+    # Rationale: a single 3s post-check catches fast devices but misses slower
+    # firmware (seen on UAP-AC-Pro-Gen2) that can take 10-20s to update its
+    # local `info` output after set-inform. Polling with backoff gives those
+    # devices room without slowing down the fast ones.
+    param(
+        [object]$Stream,
+        [int]$SessionId,
+        [int]$Timeout,
+        [string]$TargetHost,
+        [string]$ControllerName,
+        [string]$Ip
+    )
+    # Poll schedule: 3, 5, 8, 10 seconds (cumulative 3, 8, 16, 26s max wait)
+    $intervals = @(3, 5, 8, 10)
+    $attempt = 0
+    $postInform = ""
+    $postHost   = ""
+
+    foreach ($wait in $intervals) {
+        $attempt++
+        Start-Sleep -Seconds $wait
+
+        try {
+            $postInfo   = Get-DeviceInfo -Stream $Stream -SessionId $SessionId -Timeout $Timeout
+            $postInform = $postInfo.InformURL
+            $postHost   = ""
+            if ($postInform -match '://([^:/]+)') { $postHost = $Matches[1].ToLower() }
+        } catch {
+            $postInform = ""; $postHost = ""
+        }
+
+        Write-Dbg "${Ip}: [post-check T+$([int]($intervals[0..($attempt-1)] | Measure-Object -Sum).Sum)s] inform='$postInform' host='$postHost'"
+
+        if ($postHost -and $postHost -eq $TargetHost) { break }
+        if ($postHost -and $ControllerName -and $postHost -eq $ControllerName.ToLower()) { break }
+    }
+
+    $verified = $false
+    if ($postHost -and $postHost -eq $TargetHost) { $verified = $true }
+    if (-not $verified -and $postHost -and $ControllerName -and $postHost -eq $ControllerName.ToLower()) { $verified = $true }
+
+    return @{
+        Verified   = $verified
+        PostInform = $postInform
+        PostHost   = $postHost
+        Attempts   = $attempt
+    }
 }
 
 function Read-IpsFromCsv {
@@ -1453,21 +1522,24 @@ for ($idx = 0; $idx -lt $total; $idx++) {
             $row.Inform2 = $si2.Output
             if ($si2.Method -and -not $row.InformMethod) { $row.InformMethod = $si2.Method }
 
-            # -- Post-verify: re-check what controller the device reports now --
-            Start-Sleep -Seconds 3
-            $postInfo = Get-DeviceInfo -Stream $stream -SessionId $sess.SessionId -Timeout ($SshTimeout * 2)
-            $postInform = $postInfo.InformURL
-            $postHost = ""
-            if ($postInform -match '://([^:/]+)') { $postHost = $Matches[1].ToLower() }
-
-            $verified = $false
-            if ($postHost -eq $targetHost) { $verified = $true }
-            if (-not $verified -and $Controller -and $postHost -eq $Controller.ToLower()) { $verified = $true }
+            # -- Post-verify: poll the device's info output with backoff.
+            # Replaces the old single 3s check. Some firmware (seen on
+            # UAP-AC-Pro-Gen2 at v6.6.77) needs 10-20s before `info` output
+            # reflects the new inform URL locally. Polling catches those
+            # without slowing down the fast ones — breaks as soon as the
+            # URL flips.
+            $pv = Wait-InformVerified -Stream $stream -SessionId $sess.SessionId `
+                                       -Timeout ($SshTimeout * 2) `
+                                       -TargetHost $targetHost -ControllerName $Controller -Ip $ip
+            $postInform = $pv.PostInform
+            $postHost   = $pv.PostHost
+            $verified   = $pv.Verified
 
             if ($verified) {
                 $row.Status = "OK"; $countOk++
                 $methodNote = if ($row.InformMethod) { "($($row.InformMethod))" } else { "" }
-                Write-DeviceLine $ip $devInfo.Model "OK" "verified on $postHost $methodNote"
+                $attemptNote = if ($pv.Attempts -gt 1) { " [verified on poll $($pv.Attempts)]" } else { "" }
+                Write-DeviceLine $ip $devInfo.Model "OK" "verified on $postHost $methodNote$attemptNote"
 
                 # Restore device name via controller API after adoption
                 if ($modeStr -eq "Adopt" -and $RestoreNames -and $row.DevHostname -and $row.MAC -and ($ApiKey -or $ApiUser)) {
