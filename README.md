@@ -155,6 +155,34 @@ Shows the full execution plan without making any changes.
 | `-Class` | Device class filter for Migrate/Adopt: `All`, `AP`, `Switch`, `Gateway`, `Other`. Omit the flag to get an interactive post-discovery menu. | Interactive |
 | `-StrictMacMatch` | When `-InCsv` MAC column is present, skip devices whose actual MAC disagrees with the CSV entry. Default is warn-and-proceed. | Off |
 
+### Recovery flags (v3.8.0+)
+
+| PowerShell | Bash | Description | Default |
+|---|---|---|---|
+| `-ScanRetries` | `--scan-retries` | Extra TCP/22 sweep passes over hosts that didn't answer | 1 |
+| `-ResetWait` | `--reset-wait` | Max seconds to wait for a device to come back after factory reset | 240 |
+| `-Site` | `--site` | Controller site to search for Rename / name restore | all sites |
+| `-AdoptPending` | `--adopt-pending` | Adopt pending devices through the controller API before renaming | prompt |
+| `-AdoptWait` | `--adopt-wait` | Seconds to wait for API adoption to finish | 180 |
+| `-StrictHostKeys` | -- | Enforce stored SSH host keys (breaks re-login after a reset) | Off |
+
+### Renaming after a factory reset
+
+A reset device reports a factory-default hostname, and the controller only keeps a name once the device is adopted. The workflow is:
+
+```powershell
+# 1. Before resetting, save the current names
+.\unifi-sovereign.ps1 -Mode Sanity -Cidr 10.0.1.0/24 -OutCsv before.csv
+
+# 2. Reset + adopt, restoring names at the end (pending devices get adopted via the API)
+.\unifi-sovereign.ps1 -Mode Adopt -InCsv before.csv -Controller 10.0.0.5 -ResetFirst -RestoreNames -AdoptPending -ApiKey <key>
+
+# 3. Or apply names later from the saved CSV
+.\unifi-sovereign.ps1 -Mode Rename -InCsv before.csv -Controller 10.0.0.5 -AdoptPending -ApiKey <key>
+```
+
+Rename also accepts a hand-made CSV with a `MAC` column and a `Name` column.
+
 ---
 
 ## Dependency Management
@@ -250,6 +278,15 @@ CSV with the following columns:
 - Check target subnet is correct
 - Confirm devices are powered on
 
+**Devices missing from the scan**
+- The sweep retries silent hosts once by default; raise `-ScanRetries` / `--scan-retries` on busy or mesh-heavy networks
+- Wireless-mesh APs lose their uplink on factory reset and must be reset/adopted while wired
+
+**Rename says "not found" / "pending adoption"**
+- All controller sites are searched; check the MAC in the CSV matches the controller
+- Pending devices must be adopted before a name sticks: use `-AdoptPending` / `--adopt-pending`
+- "factory-default name": the CSV was captured after the reset. Use a scan from before it, or add a `Name` column
+
 **SSH auth failed**
 - Verify credentials (custom or factory defaults)
 - Ensure SSH is enabled on devices
@@ -261,7 +298,7 @@ CSV with the following columns:
 - Check firewall rules between devices and controller
 
 **Device not back after reset**
-- Factory reset takes 60-90 seconds; the script waits 90s
+- Factory reset takes 60-180 seconds; the script polls for up to `-ResetWait` / `--reset-wait` (240s)
 - Device may need additional time on some firmware versions
 - Network changes during reset may affect connectivity
 
@@ -278,7 +315,11 @@ CSV with the following columns:
 
 ## Version History
 
-### v3.7.0 (Current)
+### v3.8.0 (Current)
+
+Recovery release. Fixes APs being missed during scans and renames failing after a factory reset: host-key handling, scan retries, info/model fallbacks, all-site search, API adoption of pending devices, and CSRF. See [CHANGELOG.md](CHANGELOG.md).
+
+### v3.7.0
 
 **PowerShell — staged adoption workflow.**
 
