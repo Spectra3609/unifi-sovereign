@@ -11,7 +11,7 @@
 
 set -uo pipefail
 
-SCRIPT_VERSION="3.6.0"
+SCRIPT_VERSION="3.8.0"
 
 # Bash 3.2 compat: BASH_SOURCE may be empty when piped via bash <(curl ...)
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
@@ -38,6 +38,12 @@ API_USER=""
 API_PASS=""
 API_KEY=""
 API_PORT=443
+API_PORT_SET=0
+SITE=""
+ADOPT_PENDING=0
+ADOPT_WAIT=180
+SCAN_RETRIES=1
+RESET_WAIT=240
 SSH_TIMEOUT=7
 SCAN_TIMEOUT=3
 OUT_CSV=""
@@ -681,168 +687,278 @@ _send_factory_reset() {
 # PORT SCANNING
 # ===================================================================
 
+# Probe TCP/22 on each IP in parallel batches; prints responding IPs.
+# Usage: _tcp_sweep TIMEOUT BATCH IP...
+_tcp_sweep() {
+  local tout="$1" batch="$2"; shift 2
+  local ips=("$@") total=$# i=0 hits
+  hits=$(mktemp -d)
+  while [ "$i" -lt "$total" ]; do
+    local j
+    for ((j = i; j < i + batch && j < total; j++)); do
+      ( timeout "$tout" bash -c "cat < /dev/null > /dev/tcp/${ips[$j]}/22" 2>/dev/null && : > "$hits/${ips[$j]}" ) &
+    done
+    wait
+    i=$j
+    _progress_bar "$i" "$total" "" >&2
+  done
+  printf "\r%80s\r" "" >&2
+  ls "$hits"
+  rm -rf "$hits"
+}
+
 _port_scan() {
   local ips=("$@")
   local total=${#ips[@]}
-  local current=0
+
+  _rule "Scan" >&2
+  _info "Sweeping ${C_BLD}${total}${RST} hosts for SSH (TCP/22)" >&2
+  echo "" >&2
+
   local found=()
+  while IFS= read -r _h; do [ -n "$_h" ] && found+=("$_h"); done < <(_tcp_sweep "$SCAN_TIMEOUT" 64 "${ips[@]}")
+  _info "Pass 1: ${#found[@]} hosts responding" >&2
 
-  _rule "Scan"
-  _info "Sweeping ${C_BLD}${total}${RST} hosts for SSH (TCP/22)"
-  echo ""
-
-  for ip in "${ips[@]}"; do
-    current=$((current + 1))
-    _progress_bar "$current" "$total" ""
-
-    if timeout "$SCAN_TIMEOUT" bash -c "cat < /dev/null > /dev/tcp/$ip/22" 2>/dev/null; then
-      found+=("$ip")
-    fi
+  # One SYN per host misses devices (ARP resolution overflows under a burst
+  # of connects; busy or mesh APs answer slowly). Re-sweep silent hosts with
+  # a longer timeout and smaller batches.
+  local pass=1
+  while [ "$pass" -le "$SCAN_RETRIES" ]; do
+    local missing=() ip
+    for ip in "${ips[@]}"; do
+      case " ${found[*]} " in *" $ip "*) ;; *) missing+=("$ip") ;; esac
+    done
+    [ ${#missing[@]} -eq 0 ] && break
+    local before=${#found[@]}
+    while IFS= read -r _h; do [ -n "$_h" ] && found+=("$_h"); done < <(_tcp_sweep "$((SCAN_TIMEOUT * 2))" 32 "${missing[@]}")
+    _info "Retry pass ${pass}: +$(( ${#found[@]} - before )) hosts (re-checked ${#missing[@]} silent IPs)" >&2
+    pass=$((pass + 1))
   done
-
-  printf "\r%80s\r" ""  # clear progress line
-  echo ""
+  echo "" >&2
 
   if [ ${#found[@]} -eq 0 ]; then
-    _fail "No hosts with SSH open"
+    _fail "No hosts with SSH open" >&2
     exit 1
   fi
 
-  _ok "${C_BLD}${#found[@]}${RST} hosts responding"
+  _ok "${C_BLD}${#found[@]}${RST} hosts responding" >&2
 
-  printf '%s\n' "${found[@]}"
-}
-
-# ===================================================================
-# CONTROLLER API — NAME RESTORE
-# ===================================================================
-
-# Authenticate to UniFi controller, return cookie jar path
-# Build curl auth args: API key header OR cookie jar
-# Usage: _api_auth_args "$jar_or_empty" "$api_key_or_empty"
-# Outputs curl flags to stdout
-_api_auth_args() {
-  local jar="$1" key="$2"
-  if [ -n "$key" ]; then
-    echo "-H X-API-KEY: ${key}"
-  elif [ -n "$jar" ]; then
-    echo "-b ${jar}"
-  fi
-}
-
-_api_login() {
-  local host="$1" port="$2" user="$3" pass="$4"
-  # If using API key auth this is a no-op — return a sentinel value
-  if [ -n "$API_KEY" ]; then
-    echo "apikey"
-    return 0
-  fi
-  local jar
-  jar=$(mktemp)
-  local login_url="https://${host}:${port}/api/auth/login"
-  # Try UniFi OS (UDM/UNVR) auth first, fall back to classic
-  local http_code
-  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    -c "$jar" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
-    "$login_url")
-  if [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
-    echo "$jar"
-    return 0
-  fi
-  # Classic controller auth
-  login_url="https://${host}:${port}/api/login"
-  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    -c "$jar" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"${user}\",\"password\":\"${pass}\"}" \
-    "$login_url")
-  if [ "$http_code" = "200" ]; then
-    echo "$jar"
-    return 0
-  fi
-  rm -f "$jar"
-  return 1
-}
-
-# Build curl auth flags inline
-_api_curl_auth() {
-  local jar="$1"
-  if [ -n "$API_KEY" ]; then
-    echo "-H" "X-API-KEY: ${API_KEY}"
-  elif [ -n "$jar" ] && [ "$jar" != "apikey" ]; then
-    echo "-b" "$jar"
-  fi
-}
-
-# Poll controller for a device by MAC, return device _id (up to 60s)
-_api_find_device() {
-  local host="$1" port="$2" jar="$3" mac="$4"
-  local mac_lower
-  mac_lower=$(echo "$mac" | tr '[:upper:]' '[:lower:]')
-  local elapsed=0
-  while [ $elapsed -lt 60 ]; do
-    local resp
-    if [ -n "$API_KEY" ]; then
-      resp=$(curl -sk -H "X-API-KEY: ${API_KEY}" \
-        "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
-        || curl -sk -H "X-API-KEY: ${API_KEY}" \
-        "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
-    else
-      resp=$(curl -sk -b "$jar" \
-        "https://${host}:${port}/proxy/network/api/s/default/stat/device" 2>/dev/null \
-        || curl -sk -b "$jar" \
-        "https://${host}:${port}/api/s/default/stat/device" 2>/dev/null)
-    fi
-    local dev_id
-    dev_id=$(echo "$resp" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin).get('data', [])
-    for d in data:
-        if d.get('mac','').lower() == '${mac_lower}':
-            print(d.get('_id',''))
-            break
-except: pass
-" 2>/dev/null)
-    if [ -n "$dev_id" ]; then
-      echo "$dev_id"
-      return 0
-    fi
-    sleep 5
-    elapsed=$((elapsed + 5))
+  # Preserve target order
+  for ip in "${ips[@]}"; do
+    case " ${found[*]} " in *" $ip "*) echo "$ip" ;; esac
   done
-  return 1
 }
 
-# Rename a device by _id via controller API
-_api_rename_device() {
-  local host="$1" port="$2" jar="$3" dev_id="$4" name="$5"
-  local http_code
-  local auth_flag auth_val
-  if [ -n "$API_KEY" ]; then
-    auth_flag="-H"; auth_val="X-API-KEY: ${API_KEY}"
-  else
-    auth_flag="-b"; auth_val="$jar"
-  fi
-  # Try UniFi OS proxy path first
-  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    "$auth_flag" "$auth_val" \
-    -X PUT \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"${name}\"}" \
-    "https://${host}:${port}/proxy/network/api/s/default/rest/device/${dev_id}")
-  [ "$http_code" = "200" ] && return 0
-  # Classic path
-  http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
-    "$auth_flag" "$auth_val" \
-    -X PUT \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"${name}\"}" \
-    "https://${host}:${port}/api/s/default/rest/device/${dev_id}")
-  [ "$http_code" = "200" ] && return 0
-  return 1
+# ===================================================================
+# CONTROLLER API — NAMES / ADOPTION
+#
+# One python3 helper does the whole batch (one login, one device listing
+# per poll) so large runs don't hammer the controller's login rate limit.
+# It searches every site (or --site), sends the CSRF token that
+# username/password sessions need for writes, adopts pending devices when
+# asked (a name only sticks once adopted), and refuses factory-default
+# names. Output: one line per device on stdout, fields split by \x1f (unit
+# separator; a tab would let `read` collapse empty fields):
+#   RESULT mac ip name site detail
+# RESULT = OK | ALREADY | NOTFOUND | PENDING | DEFAULTNAME | FAIL | LOGIN
+# ===================================================================
+
+# Usage: _unifi_batch_rename CSV FIND_WAIT_SEC
+# Env: CONTROLLER, API_PORT/API_PORT_SET, API_KEY, API_USER, API_PASS, SITE,
+#      ADOPT_PENDING (1 = adopt, 0 = ask on /dev/tty unless QUIET), ADOPT_WAIT
+_unifi_batch_rename() {
+  local csv="$1" find_wait="$2" ports="$API_PORT"
+  [ "$API_PORT_SET" -eq 0 ] && ports="443,8443"
+  U_HOST="$CONTROLLER" U_PORTS="$ports" U_KEY="$API_KEY" U_USER="$API_USER" \
+  U_PASS="$API_PASS" U_SITE="$SITE" U_FIND_WAIT="$find_wait" \
+  U_ADOPT="$ADOPT_PENDING" U_ASK="$([ "$QUIET" -eq 1 ] && echo 0 || echo 1)" \
+  U_ADOPT_WAIT="$ADOPT_WAIT" \
+  python3 - "$csv" <<'PY'
+import csv, json, os, re, ssl, sys, time, urllib.request, urllib.error, http.cookiejar
+
+def log(msg): print('  \u25cf ' + msg, file=sys.stderr, flush=True)
+def norm_mac(m):
+    h = re.sub(r'[^0-9a-fA-F]', '', m or '').lower()
+    return ':'.join(h[i:i+2] for i in range(0, 12, 2)) if len(h) == 12 else ''
+
+env = os.environ
+host, key, site_want = env['U_HOST'], env.get('U_KEY', ''), env.get('U_SITE', '')
+ctx_ssl = ssl.create_default_context(); ctx_ssl.check_hostname = False; ctx_ssl.verify_mode = ssl.CERT_NONE
+
+class Api:
+    def __init__(self, port):
+        self.port, self.csrf, self.prefix = port, '', None
+        self.jar = http.cookiejar.CookieJar()
+        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar),
+                                              urllib.request.HTTPSHandler(context=ctx_ssl))
+    def raw(self, method, path, body=None):
+        req = urllib.request.Request(f'https://{host}:{self.port}{path}', method=method,
+                                     data=None if body is None else json.dumps(body).encode())
+        req.add_header('Content-Type', 'application/json')
+        if key: req.add_header('X-API-KEY', key)
+        if self.csrf and method != 'GET': req.add_header('X-CSRF-Token', self.csrf)
+        try:
+            r = self.op.open(req, timeout=20); code, hdrs, text = r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            code, hdrs, text = e.code, e.headers, e.read()
+        tok = hdrs.get('X-Updated-CSRF-Token') if hdrs else None
+        if tok: self.csrf = tok
+        try: js = json.loads(text or b'{}')
+        except ValueError: js = {}
+        return code, hdrs, js
+    def call(self, method, path, body=None):
+        """-> (ok, data, error). Detects UniFi OS (/proxy/network) vs classic."""
+        prefixes = [self.prefix] if self.prefix is not None else ['/proxy/network', '']
+        err = 'no response'
+        for pre in prefixes:
+            try: code, _, js = self.raw(method, pre + path, body)
+            except Exception as e:
+                err = str(getattr(e, 'reason', e)); continue
+            if code == 404 and self.prefix is None:
+                err = 'HTTP 404'; continue
+            meta = js.get('meta', {}) if isinstance(js, dict) else {}
+            if 200 <= code < 300:
+                self.prefix = pre
+                if meta.get('rc') == 'error': return False, None, 'controller error: %s' % meta.get('msg')
+                return True, js.get('data') if isinstance(js, dict) else None, ''
+            err = 'HTTP %d%s%s' % (code, ' (%s)' % meta['msg'] if meta.get('msg') else '',
+                                   ' - check API key / admin permissions' if code in (401, 403) else '')
+            return False, None, err
+        return False, None, err
+    def login(self):
+        if key: return True, ''
+        err = ''
+        for lp in ('/api/auth/login', '/api/login'):
+            try:
+                code, hdrs, _ = self.raw('POST', lp, {'username': env.get('U_USER', ''), 'password': env.get('U_PASS', '')})
+            except Exception as e:
+                err = 'port %s: %s' % (self.port, getattr(e, 'reason', e)); continue
+            if code in (200, 204):
+                self.csrf = hdrs.get('X-CSRF-Token') or next((c.value for c in self.jar if c.name == 'csrf_token'), '')
+                self.prefix = '/proxy/network' if lp == '/api/auth/login' else ''
+                return True, ''
+            if code != 404 or not err:
+                err = 'login HTTP %d on port %s%s' % (code, self.port,
+                      ' (wrong username/password, or a cloud/SSO account -- use a local admin or an API key)' if code in (400, 401, 403) else '')
+        return False, err
+
+# -- connect --
+api, sites, last_err = None, [], ''
+for port in env['U_PORTS'].split(','):
+    a = Api(port.strip())
+    ok, err = a.login()
+    if not ok: last_err = err; continue
+    ok, data, err = a.call('GET', '/api/self/sites')
+    if not ok: last_err = 'port %s: %s' % (port, err); continue
+    sites = [(s['name'], s.get('desc') or s['name']) for s in (data or []) if s.get('name')]
+    if site_want:
+        sites = [s for s in sites if site_want in s]
+        if not sites:
+            print('LOGIN' + '\x1f' * 5 + 'site %r not found' % site_want); sys.exit(0)
+    sites = sites or [('default', 'Default')]
+    api = a; break
+if not api:
+    print('LOGIN' + '\x1f' * 5 + (last_err or 'login failed')); sys.exit(0)
+log('connected to %s:%s -- site(s): %s' % (host, api.port, ', '.join(d for _, d in sites)))
+
+# -- entries --
+entries, seen = [], set()
+with open(sys.argv[1], newline='') as f:
+    rows = [l for l in f if l.strip() and not l.lstrip().startswith('#')]
+hdr = [h.strip().strip('"').lower() for h in rows[0].split(',')] if rows else []
+if 'mac' in hdr:
+    for r in csv.DictReader(rows):
+        r = {(k or '').strip().lower(): (v or '').strip() for k, v in r.items()}
+        name, explicit = '', False
+        for col in ('name', 'newname', 'devhostname', 'hostname'):
+            if r.get(col): name, explicit = r[col], col in ('name', 'newname'); break
+        mac = norm_mac(r.get('mac'))
+        if mac and name and mac not in seen:
+            seen.add(mac); entries.append(dict(mac=mac, name=name, explicit=explicit, ip=r.get('ip', ''), model=r.get('model', '')))
+else:
+    for f in csv.reader(rows):
+        if len(f) < 7: continue
+        mac = norm_mac(f[2])
+        if mac and f[6].strip() and mac not in seen:
+            seen.add(mac); entries.append(dict(mac=mac, name=f[6].strip(), explicit=False, ip=f[1], model=f[5]))
+log('%d device(s) with a MAC and a name' % len(entries))
+
+def devices():
+    out = {}
+    for sname, sdesc in sites:
+        ok, data, err = api.call('GET', '/api/s/%s/stat/device' % sname)
+        if not ok: log('site %s: %s' % (sdesc, err)); continue
+        for d in data or []:
+            mac = norm_mac(d.get('mac'))
+            if not mac or (mac in out and out[mac]['adopted']): continue
+            out[mac] = dict(id=d.get('_id'), site=sname, desc=sdesc, name=d.get('name') or '',
+                            model=d.get('model') or '', adopted=bool(d.get('adopted')))
+    return out
+
+devs = devices()
+deadline = time.time() + int(env.get('U_FIND_WAIT') or 0)
+while time.time() < deadline and any(e['mac'] not in devs for e in entries):
+    time.sleep(10); devs = devices()
+
+res = {}
+def is_default(name, models):
+    n = name.strip().lower()
+    return not n or n in ('ubnt', 'unifi', 'localhost', '(none)') or any(m and n == m.strip().lower() for m in models)
+for e in entries:
+    d = devs.get(e['mac'])
+    if not e['explicit'] and is_default(e['name'], [e['model'], d['model'] if d else '']):
+        res[e['mac']] = ('DEFAULTNAME', '', "'%s' is a factory-default name (use a scan CSV from before the reset, or add a Name column)" % e['name'])
+
+pending = [e for e in entries if e['mac'] not in res and e['mac'] in devs and not devs[e['mac']]['adopted']]
+adopt = env.get('U_ADOPT') == '1'
+if pending and not adopt and env.get('U_ASK') == '1':
+    try:
+        with open('/dev/tty', 'r+') as tty:
+            tty.write('\n    %d device(s) are pending adoption -- a name only sticks once adopted.\n    Adopt them now via the controller API? [Y] ' % len(pending)); tty.flush()
+            adopt = tty.readline().strip().upper() in ('', 'Y', 'YES')
+    except OSError: pass
+adopt_wait = int(env.get('U_ADOPT_WAIT') or 180)
+if pending and adopt:
+    for e in pending:
+        d = devs[e['mac']]
+        ok, _, err = api.call('POST', '/api/s/%s/cmd/devmgr' % d['site'], {'cmd': 'adopt', 'mac': e['mac']})
+        log('%s: %s' % (e['mac'], 'adopt sent (site %s)' % d['desc'] if ok else 'adopt failed: ' + err))
+    log('waiting up to %ds for adoption to complete...' % adopt_wait)
+    deadline = time.time() + adopt_wait
+    while True:
+        time.sleep(10); devs = devices()
+        if all(devs.get(e['mac'], {}).get('adopted') for e in pending) or time.time() >= deadline: break
+
+for e in entries:
+    if e['mac'] in res: continue
+    d = devs.get(e['mac'])
+    if not d:
+        res[e['mac']] = ('NOTFOUND', '', 'not on controller (searched: %s)' % ', '.join(x for _, x in sites)); continue
+    if not d['adopted']:
+        res[e['mac']] = ('PENDING', d['desc'], ('still not adopted after %ds -- rerun RENAME once it finishes' % adopt_wait) if adopt
+                         else 'pending adoption -- adopt it (or rerun with --adopt-pending), then rename'); continue
+    if d['name'] == e['name']:
+        res[e['mac']] = ('ALREADY', d['desc'], ''); continue
+    ok, _, err = api.call('PUT', '/api/s/%s/rest/device/%s' % (d['site'], d['id']), {'name': e['name']})
+    res[e['mac']] = ('OK', d['desc'], '') if ok else ('FAIL', d['desc'], err)
+
+for e in entries:
+    r, s, detail = res[e['mac']]
+    print('\x1f'.join(x.replace('\x1f', ' ') for x in (r, e['mac'], e['ip'], e['name'], s, detail)))
+PY
+}
+
+# Print one _unifi_batch_rename result line; echoes the RESULT word for tallying.
+_print_rename_result() {
+  local res="$1" mac="$2" ip="$3" name="$4" site="$5" detail="$6"
+  local who="$mac"; [ -n "$ip" ] && who="${mac} (${ip})"
+  case "$res" in
+    OK)          _ok "${who} → '${name}'  [${site}]" ;;
+    ALREADY)     _opt "${who} already named '${name}'" ;;
+    NOTFOUND|PENDING) _warn "${who}: ${detail}" ;;
+    DEFAULTNAME) _warn "${who}: skipped, ${detail}" ;;
+    *)           _fail "${who}: rename failed: ${detail}" ;;
+  esac
 }
 
 # ===================================================================
@@ -1086,6 +1202,8 @@ main() {
   # ── Scan ──
   local open_hosts=()
   while IFS= read -r _ip; do open_hosts+=("$_ip"); done < <(_port_scan "${target_ips[@]}")
+  # _port_scan runs in a subshell, so its "no hosts" exit only ends that subshell.
+  [ ${#open_hosts[@]} -eq 0 ] && exit 1
 
   # ── Process ──
   _rule "Processing"
@@ -1095,7 +1213,7 @@ main() {
   local total=${#open_hosts[@]}
   local current=0
   local count_ok=0 count_check=0 count_fail=0 count_skip=0
-  local _api_jar=""
+  local rename_queue=""
 
   for ip in "${open_hosts[@]}"; do
     current=$((current + 1))
@@ -1142,17 +1260,21 @@ main() {
 
     # SKIP-ADOPTED: ignore devices already connected to any controller
     if [ "$SKIP_ADOPTED" -eq 1 ] && [ "$MODE" != "SANITY" ]; then
-      local adopted=0
-      # Status field contains "Connected" when device has an active controller
-      if echo "$r_adopt" | grep -qi "connected"; then adopted=1; fi
-      # Inform URL set and pointing somewhere also indicates adoption
-      if [ -z "$adopted" ] || [ "$adopted" -eq 0 ]; then
-        if echo "$r_inform" | grep -q "://"; then adopted=1; fi
+      # The factory-default inform (http://unifi:8080/inform) and "Not Adopted"
+      # mean unmanaged -- counting those as adopted silently dropped reset devices.
+      local adopted=0 inform_host
+      inform_host=$(echo "$r_inform" | sed -n 's|.*://\([^:/]*\).*|\1|p' | tr '[:upper:]' '[:lower:]')
+      if echo "$r_adopt" | grep -qiE "not ?adopted|unadopted|default"; then adopted=0
+      elif echo "$r_adopt" | grep -qiE "^[[:space:]]*connected"; then adopted=1
+      elif [ -n "$inform_host" ] && [ "$inform_host" != "unifi" ]; then adopted=1
       fi
       if [ "$adopted" -eq 1 ]; then
         count_skip=$((count_skip + 1))
         _debug "${ip}: already adopted (${r_adopt:-status unknown}) — skipped"
         [ "$VERBOSE" -eq 1 ] && _device_line "$ip" "$r_model" "SKIP" "already adopted (${r_adopt:-${r_inform}})"
+        _csv_row "$OUT_CSV" "$r_ts" "$ip" "$r_mac" "true" "$used_user" \
+          "$r_model" "$r_host" "$r_fw" "$r_adopt" "$r_inform" \
+          "$r_reset" "$r_inf1" "$r_inf2" "" "SKIP" "already adopted" "$r_debug"
         continue
       fi
     fi
@@ -1177,13 +1299,19 @@ main() {
       if [ "$reset_method" != "none" ]; then
         r_reset="OK ($reset_method)"
         _debug "Reset OK: $reset_method"
-        _info "${ip}: reset sent, waiting 90s..."
-        sleep 90
+        _info "${ip}: reset sent, waiting for it to come back (up to ${RESET_WAIT}s)..."
         used_user="ubnt"; used_pass="ubnt"
-        if ! _test_ssh "$ip" "$used_user" "$used_pass" "$SSH_TIMEOUT"; then
+        # Poll rather than one fixed 90s wait: some models take 2-3 min to boot.
+        local waited=60 back=0
+        sleep 60
+        while [ "$waited" -lt "$RESET_WAIT" ]; do
+          if _test_ssh "$ip" "$used_user" "$used_pass" "$SSH_TIMEOUT"; then back=1; break; fi
+          sleep 10; waited=$((waited + 10 + SSH_TIMEOUT))
+        done
+        if [ "$back" -eq 0 ]; then
           r_reset="Sent (device not back)"
-          r_note="Reset sent, device not back within 90s"
-          _warn "${ip}: not back after reset"
+          r_note="Reset sent, device not back within ${RESET_WAIT}s"
+          _warn "${ip}: not back after reset (raise --reset-wait or check DHCP)"
         fi
       else
         r_reset="Failed"
@@ -1214,36 +1342,12 @@ main() {
         count_ok=$((count_ok + 1))
         _device_line "$ip" "$r_model" "OK" "set-inform accepted (${inf_method})"
 
-        # Restore device name via controller API after adoption
-        if [ "$MODE" = "ADOPT" ] && [ "$RESTORE_NAMES" -eq 1 ] && [ -n "$r_host" ] && [ -n "$r_mac" ] && { [ -n "$API_KEY" ] || [ -n "$API_USER" ]; }; then
-          if [ -z "$_api_jar" ]; then
-            if [ -n "$API_KEY" ]; then
-              _api_jar="apikey"
-              _info "Using API key auth for controller"
-            else
-              _info "Authenticating to controller API..."
-              _api_jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
-                _warn "Controller API login failed — skipping name restore"
-              }
-            fi
-          fi
-          if [ -n "$_api_jar" ]; then
-            _info "${ip}: waiting for device to appear in controller (MAC: ${r_mac})..."
-            local dev_id
-            dev_id=$(_api_find_device "$CONTROLLER" "$API_PORT" "$_api_jar" "$r_mac")
-            if [ -n "$dev_id" ]; then
-              if _api_rename_device "$CONTROLLER" "$API_PORT" "$_api_jar" "$dev_id" "$r_host"; then
-                _ok "${ip}: renamed to '${r_host}'"
-                r_note="${r_note}${r_note:+; }name restored: ${r_host}"
-              else
-                _warn "${ip}: rename failed — set manually in controller"
-                r_note="${r_note}${r_note:+; }rename failed"
-              fi
-            else
-              _warn "${ip}: device not found in controller within 60s — rename skipped"
-              r_note="${r_note}${r_note:+; }device not found for rename"
-            fi
-          fi
+        # Name restore is batched after the loop: a just-informed device
+        # needs time to appear on the controller, and after a reset it is
+        # pending adoption until adopted.
+        if [ "$MODE" = "ADOPT" ] && [ "$RESTORE_NAMES" -eq 1 ] && [ -n "$r_host" ] && [ -n "$r_mac" ]; then
+          [ -z "$rename_queue" ] && { rename_queue=$(mktemp); echo "MAC,DevHostname,Model,IP" > "$rename_queue"; }
+          echo "$(_csv_escape "$r_mac"),$(_csv_escape "$r_host"),$(_csv_escape "$r_model"),$(_csv_escape "$ip")" >> "$rename_queue"
         fi
       else
         r_status="CHECK"
@@ -1257,6 +1361,22 @@ main() {
         "$r_reset" "$r_inf1" "$r_inf2" "$r_method" "$r_status" "$r_note" "$r_debug"
     fi
   done
+
+  # ── Restore names (batched) ──
+  if [ -n "$rename_queue" ]; then
+    _rule "Restore Names"
+    if [ -z "$API_KEY" ] && [ -z "$API_USER" ]; then
+      _warn "--restore-names needs --api-key or --api-user/--api-pass — skipped. Rerun later with --mode RENAME --input ${OUT_CSV}"
+    else
+      local res mac rip name site detail
+      while IFS=$'\x1f' read -r res mac rip name site detail; do
+        [ -z "$res" ] && continue
+        if [ "$res" = "LOGIN" ]; then _warn "Controller API login failed (${detail}) — skipping name restore"; break; fi
+        _print_rename_result "$res" "$mac" "$rip" "$name" "$site" "$detail"
+      done < <(_unifi_batch_rename "$rename_queue" 120)
+    fi
+    rm -f "$rename_queue"
+  fi
 
   # ── Results ──
   _rule "Results"
@@ -1316,68 +1436,38 @@ _run_rename() {
     fi
   fi
 
-  # Init auth
-  local _jar
-  if [ -n "$API_KEY" ]; then
-    _jar="apikey"
-    _info "Auth: API key"
-  else
-    _info "Authenticating to controller..."
-    _jar=$(_api_login "$CONTROLLER" "$API_PORT" "$API_USER" "$API_PASS") || {
-      _fail "Controller API login failed"
-      exit 1
-    }
-  fi
-
   _rule "Applying names from CSV"
   _info "Source: $IN_CSV"
+  _info "Auth: $([ -n "$API_KEY" ] && echo "API key" || echo "$API_USER")"
   echo ""
 
-  local count_ok=0 count_skip=0 count_fail=0
-  local lineno=0
-
-  while IFS=',' read -r line; do
-    # Skip comment/header lines
-    echo "$line" | grep -q '^#' && continue
-    echo "$line" | grep -qi '^Timestamp' && continue
-    lineno=$((lineno + 1))
-
-    # Parse CSV fields (Timestamp,IP,MAC,Connected,Username,Model,DevHostname,...)
-    # Field indices (1-based): 1=Timestamp 2=IP 3=MAC 4=Connected 5=Username 6=Model 7=DevHostname
-    local mac hostname
-    mac=$(echo "$line" | awk -F',' '{gsub(/"/, "", $3); print $3}' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-    hostname=$(echo "$line" | awk -F',' '{gsub(/"/, "", $7); print $7}' | tr -d '[:space:]')
-
-    # Skip rows with no MAC or no hostname
-    [ -z "$mac" ] || [ -z "$hostname" ] && continue
-    # Validate MAC format
-    echo "$mac" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || continue
-
-    # Look up device in controller
-    local dev_id
-    dev_id=$(_api_find_device "$CONTROLLER" "$API_PORT" "$_jar" "$mac")
-
-    if [ -z "$dev_id" ]; then
-      _warn "${mac}: not found in controller — skipped"
-      count_skip=$((count_skip + 1))
-      continue
+  local count_ok=0 count_already=0 count_pending=0 count_notfound=0 count_default=0 count_fail=0
+  local res mac ip name site detail
+  while IFS=$'\x1f' read -r res mac ip name site detail; do
+    [ -z "$res" ] && continue
+    if [ "$res" = "LOGIN" ]; then
+      _fail "Controller API login failed: ${detail}"
+      exit 1
     fi
-
-    if _api_rename_device "$CONTROLLER" "$API_PORT" "$_jar" "$dev_id" "$hostname"; then
-      _ok "${mac} → '${hostname}'"
-      count_ok=$((count_ok + 1))
-    else
-      _warn "${mac}: rename failed (API error)"
-      count_fail=$((count_fail + 1))
-    fi
-
-  done < "$IN_CSV"
+    _print_rename_result "$res" "$mac" "$ip" "$name" "$site" "$detail"
+    case "$res" in
+      OK)          count_ok=$((count_ok + 1)) ;;
+      ALREADY)     count_already=$((count_already + 1)) ;;
+      PENDING)     count_pending=$((count_pending + 1)) ;;
+      NOTFOUND)    count_notfound=$((count_notfound + 1)) ;;
+      DEFAULTNAME) count_default=$((count_default + 1)) ;;
+      *)           count_fail=$((count_fail + 1)) ;;
+    esac
+  done < <(_unifi_batch_rename "$IN_CSV" 15)
 
   _rule "Results"
   echo -e "  ${C_GLD}┌──────────────────────────────────┐${RST}"
-  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Renamed${RST}          ${C_GRN}${C_BLD}${count_ok}${RST}              ${C_GLD}│${RST}"
-  [ "$count_skip" -gt 0 ] && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Not found${RST}        ${C_WRN}${count_skip}${RST}              ${C_GLD}│${RST}"
-  [ "$count_fail" -gt 0 ] && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Failed${RST}           ${C_RED}${C_BLD}${count_fail}${RST}              ${C_GLD}│${RST}"
+  echo -e "  ${C_GLD}│${RST}  ${C_DIM}Renamed${RST}          ${C_GRN}${C_BLD}${count_ok}${RST}"
+  [ "$count_already" -gt 0 ]  && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Already named${RST}    ${C_MUT}${count_already}${RST}"
+  [ "$count_pending" -gt 0 ]  && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Pending adoption${RST} ${C_WRN}${count_pending}${RST}"
+  [ "$count_notfound" -gt 0 ] && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Not found${RST}        ${C_WRN}${count_notfound}${RST}"
+  [ "$count_default" -gt 0 ]  && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Default name skip${RST} ${C_WRN}${count_default}${RST}"
+  [ "$count_fail" -gt 0 ]     && echo -e "  ${C_GLD}│${RST}  ${C_DIM}Failed${RST}           ${C_RED}${C_BLD}${count_fail}${RST}"
   echo -e "  ${C_GLD}└──────────────────────────────────┘${RST}"
   echo ""
   _ok "Done."
@@ -1410,11 +1500,16 @@ _show_help() {
   echo -e "    --api-key KEY        ${C_DIM}UniFi OS API key (preferred auth for --restore-names)${RST}"
   echo -e "    --api-user USER      ${C_DIM}Controller admin username (fallback auth for --restore-names)${RST}"
   echo -e "    --api-pass PASS      ${C_DIM}Controller admin password (fallback auth for --restore-names)${RST}"
-  echo -e "    --api-port PORT      ${C_DIM}Controller API port (default: 443)${RST}"
+  echo -e "    --api-port PORT      ${C_DIM}Controller API port (default: try 443, then 8443)${RST}"
+  echo -e "    --site NAME          ${C_DIM}Controller site to search (default: all sites)${RST}"
+  echo -e "    --adopt-pending      ${C_DIM}Adopt pending devices via the API before renaming${RST}"
+  echo -e "    --adopt-wait SEC     ${C_DIM}Wait for API adoption to finish (default: 180)${RST}"
+  echo -e "    --scan-retries N     ${C_DIM}Extra sweep passes over silent hosts (default: 1)${RST}"
+  echo -e "    --reset-wait SEC     ${C_DIM}Max wait for a device to return after reset (default: 240)${RST}"
   echo -e "    --ssh-timeout SEC    ${C_DIM}SSH timeout (default: 7)${RST}"
   echo -e "    --scan-timeout SEC   ${C_DIM}Port scan timeout (default: 3)${RST}"
   echo -e "    --output FILE        ${C_DIM}CSV output path${RST}"
-  echo -e "    --input FILE         ${C_DIM}CSV input path (RENAME mode — use existing scan CSV)${RST}"
+  echo -e "    --input FILE         ${C_DIM}CSV input path (RENAME mode — scan CSV, or any CSV with MAC + Name columns)${RST}"
   echo -e "    --dry-run            ${C_DIM}Plan without executing${RST}"
   echo -e "    --verbose, -v        ${C_DIM}Debug output${RST}"
   echo -e "    --quiet, -q          ${C_DIM}Minimal output${RST}"
@@ -1448,7 +1543,12 @@ while [ $# -gt 0 ]; do
     --api-key)        API_KEY="$2"; shift 2 ;;
     --api-user)       API_USER="$2"; shift 2 ;;
     --api-pass)       API_PASS="$2"; shift 2 ;;
-    --api-port)       API_PORT="$2"; shift 2 ;;
+    --api-port)       API_PORT="$2"; API_PORT_SET=1; shift 2 ;;
+    --site)           SITE="$2"; shift 2 ;;
+    --adopt-pending)  ADOPT_PENDING=1; shift ;;
+    --adopt-wait)     ADOPT_WAIT="$2"; shift 2 ;;
+    --scan-retries)   SCAN_RETRIES="$2"; shift 2 ;;
+    --reset-wait)     RESET_WAIT="$2"; shift 2 ;;
     --ssh-timeout)    SSH_TIMEOUT="$2"; shift 2 ;;
     --scan-timeout) SCAN_TIMEOUT="$2"; shift 2 ;;
     --output)      OUT_CSV="$2"; shift 2 ;;
